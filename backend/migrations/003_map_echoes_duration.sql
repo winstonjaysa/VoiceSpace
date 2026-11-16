@@ -1,3 +1,6 @@
+-- !! SUPERSEDED: do NOT run this file. night crawler's 004_place.sql (v2/night-crawler/004_place.sql) replaces it:
+-- !! it adds duration_s to map_echoes too, plus place_kind / place_name / level. Run order: migration-v2.sql -> 004_place.sql.
+-- !! Kept only for history.
 -- 003_map_echoes_duration.sql — for night crawler, to run AFTER migration-v2.sql (not before; not instead of it).
 -- Adds duration_s to map_echoes so the map card and the Nearby drawer can show each echo's length.
 -- Play counts need nothing new: migration-v2 already has echoes.listen_count, record_listen() and returns
