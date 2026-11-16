@@ -1,0 +1,34 @@
+# Decodes the text-encoded PNG app icons in icons/src/*.png.b64 into icons/*.png (checked against SHA256SUMS),
+# commits them, and asks GitHub Pages to rebuild. Exists because the repo is updated through a text-only API.
+name: pwa-icons
+on:
+  push:
+    branches: [main]
+    paths: ['icons/src/**']
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode icons
+        run: |
+          for f in icons/src/*.png.b64; do base64 -d "$f" > "icons/$(basename "$f" .b64)"; done
+          (cd icons && sha256sum -c src/SHA256SUMS)
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add icons/*.png
+          if git diff --cached --quiet; then echo "icons unchanged"; exit 0; fi
+          git commit -m "PWA icons: decode PNGs from icons/src"
+          git push
+          echo "pushed=1" >> "$GITHUB_ENV"
+      - name: Rebuild Pages
+        if: env.pushed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds" || echo "Pages rebuild request failed; the next push will rebuild"
