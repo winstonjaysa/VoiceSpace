@@ -38,6 +38,8 @@ function tintBaseStyle(map) {
   }
 }
 
+import { isOpened } from './opened.js';
+
 export function createMapView(container, { center, zoom = 15.3, onSelect = () => {}, onMove = () => {}, onReady = () => {}, onError = () => {},
   onUserPan = () => {} } = {}) {
   const ml = window.maplibregl;
@@ -80,6 +82,7 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
         id: e.id, rpx0: (e.radius_m || 45) / (M_PER_PX_Z0 * Math.cos(e.lat * Math.PI / 180)),
         heat, life: Math.max(0.12, Math.min(1, left / DAY)), fresh: e.freshUntil > now ? 1 : 0, mine: e.mine ? 1 : 0,
         blurred: e.blurred || e.radius_m > 0 ? 1 : 0, pending: e.queued ? 1 : 0,
+        cherry: !e.mine && !e.queued && !isOpened(e.id) ? 1 : 0,          // unopened on this device
       } };
     }) };
   }
@@ -97,8 +100,10 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     map.addSource('me', { type: 'geojson', data: meFeatures() });
     const single = ['!', ['has', 'point_count']];
     const unclustered = ['all', single, ['==', ['get', 'blurred'], 1]];      // blurred: glow layers
-    const exact = ['all', single, ['==', ['get', 'blurred'], 0]];            // exact pins
+    const exact = ['all', single, ['==', ['get', 'blurred'], 0], ['==', ['get', 'cherry'], 0]];   // opened exact pins
+    const cherry = ['all', single, ['==', ['get', 'cherry'], 1]];                                 // unopened: cherries
     if (!map.hasImage('me-cone')) map.addImage('me-cone', coneImage(), { pixelRatio: 2 });
+    if (!map.hasImage('cherry')) map.addImage('cherry', cherryImage(), { pixelRatio: 2 });
     // clusters: a soft halo + thin ring + count
     map.addLayer({ id: 'cluster-halo', type: 'circle', source: 'echoes', filter: ['has', 'point_count'], paint: {
       'circle-color': HEAT_COLOR, 'circle-blur': 1,
@@ -142,6 +147,15 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
       'circle-stroke-color': ['case', ['==', ['get', 'pending'], 1], '#f2d3b0', HEAT_COLOR] } });
     map.addLayer({ id: 'pin-flash', type: 'circle', source: 'echoes', filter: ['all', exact, ['==', ['get', 'fresh'], 1]], paint: {
       'circle-radius': pinR(18, 34), 'circle-color': '#e9f6ff', 'circle-blur': 1, 'circle-opacity': 0.35 } });
+    // unopened echoes: a glowing, pulsing cherry
+    map.addLayer({ id: 'cherry-glow', type: 'circle', source: 'echoes', filter: cherry, paint: {
+      'circle-radius': pinR(12, 26), 'circle-color': '#ff3b5c', 'circle-blur': 1, 'circle-opacity': ['*', ['get', 'life'], 0.55] } });
+    map.addLayer({ id: 'cherry-ring', type: 'circle', source: 'echoes', filter: cherry, paint: {
+      'circle-radius': pinR(8, 16), 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-width': 1.4, 'circle-stroke-color': '#ff6b81', 'circle-stroke-opacity': 0 } });
+    map.addLayer({ id: 'cherry-icon', type: 'symbol', source: 'echoes', filter: cherry, layout: {
+      'icon-image': 'cherry', 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-anchor': 'bottom', 'icon-offset': [0, 6],
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.55, 18, 1] },
+      paint: { 'icon-opacity': ['max', 0.55, ['get', 'life']] } });
     // you
     map.addLayer({ id: 'me-cone', type: 'symbol', source: 'me', filter: ['has', 'heading'], layout: {
       'icon-image': 'me-cone', 'icon-rotate': ['get', 'heading'], 'icon-rotation-alignment': 'map',
@@ -162,7 +176,7 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     animate();
   });
 
-  const echoLayers = ['echo-field', 'echo-haze', 'echo-bloom', 'pin-halo', 'pin-core'];
+  const echoLayers = ['echo-field', 'echo-haze', 'echo-bloom', 'pin-halo', 'pin-core', 'cherry-icon', 'cherry-glow'];
   map.on('click', (ev) => {
     if (!ready) return;
     const pad = 14, p = ev.point;
@@ -210,6 +224,13 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
       map.setPaintProperty('pin-ripple', 'circle-radius', ['interpolate', ['linear'], ['zoom'], 11, 4 + 14 * e2, 18, 6 + 30 * e2]);
       map.setPaintProperty('pin-ripple', 'circle-stroke-opacity', ['*', ['get', 'life'], 0.7 * (1 - k2)]);
       map.setPaintProperty('pin-flash', 'circle-opacity', 0.15 + 0.25 * Math.abs(Math.sin(t / 380)));
+      if (map.getLayer('cherry-glow')) {
+        const pulse = 0.5 + 0.5 * Math.sin(t / 420);                    // ~2.6 s breathing glow + sonar ring + bob
+        map.setPaintProperty('cherry-glow', 'circle-opacity', ['*', ['get', 'life'], 0.3 + 0.4 * pulse]);
+        map.setPaintProperty('cherry-ring', 'circle-radius', ['interpolate', ['linear'], ['zoom'], 11, 5 + 14 * e2, 18, 8 + 30 * e2]);
+        map.setPaintProperty('cherry-ring', 'circle-stroke-opacity', ['*', ['get', 'life'], 0.8 * (1 - k2)]);
+        map.setPaintProperty('cherry-icon', 'icon-translate', [0, -2.5 * pulse]);
+      }
     };
     raf = requestAnimationFrame(tick);
   }
@@ -235,6 +256,15 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     project({ lat, lng }) { return map.project([lng, lat]); },
     bounds() { const b = map.getBounds(); return { minLat: b.getSouth(), minLng: b.getWest(), maxLat: b.getNorth(), maxLng: b.getEast() }; },
     resize() { map.resize(); },
+    /** One-shot drop-in: a pin falls onto the spot with a bounce and a ripple (DOM marker, transforms only). */
+    dropIn({ lat, lng }, { cherry = false } = {}) {
+      if (reducedMotion() || !ready) return;
+      const el = document.createElement('div'); el.className = `drop-in${cherry ? ' is-cherry' : ''}`; el.setAttribute('aria-hidden', 'true');
+      el.innerHTML = '<i class="di-ring"></i><i class="di-pin"></i>';
+      const mk = new ml.Marker({ element: el, anchor: 'center' }).setLngLat([lng, lat]).addTo(map);
+      setTimeout(() => mk.remove(), 1400);
+    },
+    refreshPins() { if (ready && map.getSource('echoes')) map.getSource('echoes').setData(toFeatures(echoes)); },
     destroy() { cancelAnimationFrame(raf); map.remove(); },
   };
   return api;
@@ -250,6 +280,22 @@ function coneImage() {
   const half = 32 * Math.PI / 180, up = -Math.PI / 2;
   g.arc(cx, cy, R, up - half, up + half); g.closePath(); g.fill();
   return g.getImageData(0, 0, S, S);
+}
+/** Cherry: two glossy red drops on a forked stem with a leaf (drawn, not an emoji, so it looks the same everywhere). */
+function cherryImage() {
+  const W = 72, H = 80, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.lineCap = 'round'; g.strokeStyle = '#5fbf6a'; g.lineWidth = 3.2;
+  g.beginPath(); g.moveTo(40, 10); g.quadraticCurveTo(30, 26, 22, 48); g.moveTo(40, 10); g.quadraticCurveTo(46, 30, 50, 52); g.stroke();
+  g.fillStyle = '#7ed492'; g.beginPath(); g.ellipse(50, 12, 10, 5, -0.5, 0, Math.PI * 2); g.fill();
+  const berry = (x, y, r) => {
+    const grd = g.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+    grd.addColorStop(0, '#ff8fa0'); grd.addColorStop(0.45, '#ff2d55'); grd.addColorStop(1, '#a30d2c');
+    g.fillStyle = grd; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+    g.fillStyle = 'rgba(255,255,255,.75)'; g.beginPath(); g.ellipse(x - r * 0.38, y - r * 0.42, r * 0.22, r * 0.13, -0.6, 0, Math.PI * 2); g.fill();
+  };
+  berry(21, 58, 14); berry(50, 61, 14);
+  return g.getImageData(0, 0, W, H);
 }
 function dist2(a, b) { return (a.x - b.x) ** 2 + (a.y - b.y) ** 2; }
 function hashId(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0; return Math.abs(h); }

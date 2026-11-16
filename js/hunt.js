@@ -28,6 +28,8 @@ function destPoint(lat, lng, distM, brgDeg) {
   return { lat: p2 * 180 / Math.PI, lng: ((l2 * 180 / Math.PI + 540) % 360) - 180 };
 }
 
+import { durationMs, setDuration } from './opened.js';
+
 function storeSource(store) {
   const seen = new Map();                         // id -> store echo (getAudioUrl wants the echo object)
   const src = {
@@ -138,6 +140,14 @@ export async function startHunt(container, { store, desk = new URLSearchParams(l
     [{ transform: 'scale(.35)', opacity: .75 * k }, { transform: 'scale(1.08)', opacity: 0 }], { duration: 1300, easing: 'cubic-bezier(.2,.6,.3,1)' });
 
   const base = typeof store.createHuntSource === 'function' ? store.createHuntSource() : storeSource(store);
+  // old echoes may have no stored duration: read it from the audio metadata once unlocked (cached on this device)
+  const rawUnlock = base.unlock.bind(base);
+  base.unlock = async (id, q) => {
+    const url = await rawUnlock(id, q);
+    try { if (!durationMs(id) && url) { const a = new Audio(); a.preload = 'metadata'; a.src = url;
+      a.addEventListener('loadedmetadata', () => { if (Number.isFinite(a.duration)) setDuration(id, a.duration * 1000); }, { once: true }); } } catch { /* ignore */ }
+    return url;
+  };
   const source = withPreciseGate(targetId ? targetedSource(base, targetId) : base, !desk);
   const hunt = createHunt({ source, onState: render, onPing: p => pulse(p.distanceM < 40 ? 1 : 0.7),
     options: { ...(targetId ? { searchRadiusM: 500 } : {}), ...(desk ? { useDeviceGeolocation: false, useDeviceCompass: false } : {}), ...options } });

@@ -748,6 +748,7 @@ function mapRecord(r, fuzz = 'client') {
       expires_at: r.expiresAt ?? r.expires_at ? new Date(r.expiresAt ?? r.expires_at).toISOString() : null,
       place_label: r.placeLabel ?? r.place_label ?? null, fuzz: 'server', mine: isMine(r.id),
       reply_count: r.replyCount ?? r.reply_count ?? 0, listen_count: r.listenCount ?? r.listen_count ?? 0, tags: r.tags ?? [],
+      duration_ms: r.duration_ms ?? (r.duration_s ?? r.durationS) != null ? (r.duration_ms ?? Math.round((r.duration_s ?? r.durationS) * 1000)) : null,
     };
   }
   const lat = r.echo_lat ?? r.lat, lng = r.echo_lng ?? r.lng;
@@ -760,6 +761,7 @@ function mapRecord(r, fuzz = 'client') {
     created_at: r.created_at ? new Date(r.created_at).toISOString() : null,
     expires_at: r.expires_at ? new Date(r.expires_at).toISOString() : null,
     place_label: r.place_label ?? null, fuzz: blurred ? 'client' : 'none', mine: isMine(r.id),
+    duration_ms: r.duration_ms ?? (r.duration_s ?? r.durationS) != null ? (r.duration_ms ?? Math.round((r.duration_s ?? r.durationS) * 1000)) : null,
   };
 }
 export { mapRecord };

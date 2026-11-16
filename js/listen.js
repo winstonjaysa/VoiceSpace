@@ -3,6 +3,8 @@
 // inside the engine (nearby_echoes within 500 m); beyond that we guide toward the echo's fuzzy glow.
 import * as store from './echo-store.js';
 import { startHunt } from './hunt.js';
+import { markOpened } from './opened.js';
+import { haptic, cherryBurst } from './fx.js';
 
 const R = 6371008.8, rad = (d) => d * Math.PI / 180;
 function haversine(a, b) {
@@ -50,7 +52,20 @@ export function openHunt(root, { target = null, onClose = () => {}, onState, ini
     chip.textContent = h >= 1 ? `fades in ${Math.round(h)} h` : `fades in ${Math.max(1, Math.round(h * 60))} min`;
   } else chip.hidden = true;
 
+  // rewards: haptic ticks as the tune-in clears, a cherry burst the first time an echo opens on this device
+  let tickBucket = -1, lastTick = 0, playing = null;
   const onHuntState = (s) => {
+    const t = s.tuning;
+    if (t && t.status !== 'playing') tickBucket = -1;
+    if (t?.status === 'playing') {
+      if (!playing || playing.id !== t.id) {
+        playing = { id: t.id, at: Date.now() };
+        if (markOpened(t.id)) { const r = root.getBoundingClientRect(); cherryBurst(r.width / 2, r.height * 0.42); root.dataset.opened = t.id; }
+      }
+      const b = Math.floor((t.alignment || 0) * 8);                     // 8 steps from noise to clear
+      if (b > tickBucket && performance.now() - lastTick > 110) { haptic(b >= 7 ? 'success' : 'tick'); lastTick = performance.now(); }
+      tickBucket = b;
+    }
     root.dataset.status = s.status;
     root.dataset.target = s.target?.id || '';
     if (target && !s.target && s.position) {
@@ -76,6 +91,11 @@ export function openHunt(root, { target = null, onClose = () => {}, onState, ini
 
   function close() {
     if (closed) return; closed = true;
+    if (playing && store.mapMode === 'map_echoes') {          // play count (migration-v2 record_listen); skipped before it
+      const pos = window.__huntState?.position || initialFix;
+      store.v2Client().then((c) => c && pos && c.rpc('record_listen', { echo_id: playing.id, device_id: store.getDeviceId(), lat: pos.lat, lng: pos.lng,
+        accuracy_m: pos.accuracy ?? null, listened_ms: Date.now() - playing.at, completed: false })).catch(() => {});
+    }
     hunt?.stop(); hunt = null; root.innerHTML = ''; onClose();
   }
   $('[data-close]').addEventListener('click', close);
