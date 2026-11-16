@@ -102,7 +102,7 @@ function typeWord(tags = {}) {
   if (tags.shop === 'mall') return 'a mall';
   return TYPE_WORD[tags.building] || TYPE_WORD[tags.amenity] || TYPE_WORD[tags.shop] || 'a building';
 }
-const PARK_RE = /^(park|garden|playground|pitch|nature_reserve|common|recreation_ground|dog_park|golf_course|cemetery|track|stadium)$/;
+const PARK_RE = /^(park|garden|grass|village_green|meadow|playground|pitch|nature_reserve|common|recreation_ground|dog_park|golf_course|cemetery|track|stadium)$/; // anchored: 'parking' never matches
 
 // ------------------------------------------------------------------------------------------------ levels + labels
 export function levelOptions(tags = {}, extra = []) {
@@ -196,8 +196,8 @@ function buildQuery(lat, lng, r) {
   return `[out:json][timeout:12];
 is_in(${L})->.a;
 (way(pivot.a)[building];rel(pivot.a)[building];way(pivot.a)[shop];rel(pivot.a)[shop];way(pivot.a)[amenity];rel(pivot.a)[amenity];
- way(pivot.a)[leisure];rel(pivot.a)[leisure];way(pivot.a)[tourism];way(pivot.a)[landuse~"^(retail|recreation_ground|cemetery)$"];
- rel(pivot.a)[landuse~"^(retail|recreation_ground|cemetery)$"];way(pivot.a)[indoor][level];)->.inside;
+ way(pivot.a)[leisure];rel(pivot.a)[leisure];way(pivot.a)[place=square];way(pivot.a)[highway=pedestrian];rel(pivot.a)[highway=pedestrian];way(pivot.a)[tourism];way(pivot.a)[landuse~"^(retail|recreation_ground|cemetery|grass|village_green|meadow)$"];
+ rel(pivot.a)[landuse~"^(retail|recreation_ground|cemetery|grass|village_green|meadow)$"];way(pivot.a)[indoor][level];)->.inside;
 (way(${ar})[building];rel(${ar})[building];way(${ar})[shop=mall];)->.near;
 way(${rr})[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|road|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$"]->.roads;
 (way.inside[building];way.inside[shop=mall];way.near;)->.bw;
@@ -326,6 +326,8 @@ export function classify({ lat, lng, accuracy = 20 }, { polys, roads, entrances 
     return out;
   }
   if (park) { const name = nameOf(park.tags) || 'a park'; return { ...base, kind: 'park', name, label: `In ${name}`, building: null }; }
+  const square = containing.find((p) => p.tags.place === 'square' || (p.tags.highway === 'pedestrian' && p.tags.area === 'yes'));
+  if (square) { const name = nameOf(square.tags); return { ...base, kind: 'outdoor', square: true, name: name || 'a public square', label: name ? `In ${name}` : 'In a public square' }; }
   if (base.road?.name) return { ...base, kind: 'outdoor', name: base.road.name, label: `Near ${base.road.name}` };
   return { ...base, kind: polys.length || roads.length ? 'outdoor' : 'unknown', name: null, label: null };
 }
@@ -343,7 +345,13 @@ export function fromTiles(map, { lat, lng }) {
   if (!map?.getStyle) return null;
   const st = map.getStyle(); const src = Object.keys(st.sources || {}).find((k) => st.sources[k].type === 'vector'); if (!src) return null;
   const f = frame({ lat, lng });
-  const q = (layer) => { try { return map.querySourceFeatures(src, { sourceLayer: layer }); } catch { return []; } };
+  // only features whose bounding box comes within ~200 m: a city tile set holds ~10k polygons (projecting all took 5 s)
+  const mLat = 200 / 111320, mLng = 200 / (111320 * Math.cos(lat * Math.PI / 180));
+  const near = (g) => { let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity;
+    const walk = (x) => { if (typeof x[0] === 'number') { if (x[0] < a) a = x[0]; if (x[0] > b) b = x[0]; if (x[1] < c) c = x[1]; if (x[1] > d) d = x[1]; } else for (const y of x) walk(y); };
+    walk(g.coordinates); return a - mLng <= lng && lng <= b + mLng && c - mLat <= lat && lat <= d + mLat; };
+  const q = (layer) => { const seen = new Set(); try { return map.querySourceFeatures(src, { sourceLayer: layer }).filter((ft) => {
+    if (!near(ft.geometry)) return false; const k = `${layer}:${ft.id ?? ''}:${JSON.stringify(ft.geometry.coordinates).slice(0, 80)}`; if (seen.has(k)) return false; seen.add(k); return true; }); } catch { return []; } };
   const polys = [];
   const addPoly = (geom, tags) => {
     const list = geom.type === 'Polygon' ? [geom.coordinates] : geom.type === 'MultiPolygon' ? geom.coordinates : [];
@@ -352,7 +360,9 @@ export function fromTiles(map, { lat, lng }) {
   };
   for (const ft of q('building')) addPoly(ft.geometry, { building: 'yes' });
   for (const ft of q('park')) addPoly(ft.geometry, { leisure: 'park', name: ft.properties.name });
-  for (const ft of q('landuse')) if (/park|cemetery|recreation/.test(ft.properties.class)) addPoly(ft.geometry, { leisure: 'park' });
+  const GREEN = /^(park|garden|grass|village_green|recreation_ground|playground|pitch|cemetery)$/;   // anchored: 'parking' is not a park
+  for (const ft of q('landuse')) if (GREEN.test(ft.properties.class || '')) addPoly(ft.geometry, { leisure: 'park' });
+  for (const ft of q('landcover')) if (ft.properties.class === 'grass' && GREEN.test(ft.properties.subclass || '')) addPoly(ft.geometry, { leisure: 'park' });
   const names = q('transportation_name');
   const roads = [];
   for (const ft of q('transportation')) {
@@ -360,12 +370,23 @@ export function fromTiles(map, { lat, lng }) {
     const lines = ft.geometry.type === 'LineString' ? [ft.geometry.coordinates] : ft.geometry.type === 'MultiLineString' ? ft.geometry.coordinates : [];
     for (const c of lines) roads.push({ name: null, cls, coords: c });
   }
+  const ROADISH = (pr) => (ROAD_HALF_W[pr.class] || /^(primary|secondary|tertiary|trunk|motorway|minor|service)$/.test(pr.class)) && pr.brunnel !== 'tunnel';
   for (const ft of names) {
+    if (!ROADISH(ft.properties)) continue;        // footpaths / the underground PATH aren't "roads" to be near
     const lines = ft.geometry.type === 'LineString' ? [ft.geometry.coordinates] : ft.geometry.type === 'MultiLineString' ? ft.geometry.coordinates : [];
     for (const c of lines) roads.push({ name: ft.properties.name || ft.properties['name:latin'] || null, cls: ft.properties.class, coords: c });
   }
   // POIs: a named shop/mall under the point names the building
   const pois = q('poi').filter((p) => p.geometry.type === 'Point' && p.properties.name);
+  // pedestrian areas (squares / plazas): tiles carry the outline unnamed, the name rides on a nearby POI
+  const SQ_POI = /\b(square|plaza|place|piazza|commons?)\b/i;
+  for (const ft of q('transportation')) {
+    const pr = ft.properties; if (!/Polygon/.test(ft.geometry.type) || !(pr.class === 'pedestrian' || pr.subclass === 'pedestrian') || pr.brunnel === 'tunnel') continue;
+    const near = pois.map((p) => { const [x, y] = f.xy({ lng: p.geometry.coordinates[0], lat: p.geometry.coordinates[1] }); return { p, d: Math.hypot(x, y) }; })
+      .filter(({ p, d }) => d < 180 && (SQ_POI.test(p.properties.name) || /^(attraction|square|plaza)$/.test(p.properties.class)))
+      .sort((a, b) => (SQ_POI.test(b.p.properties.name) - SQ_POI.test(a.p.properties.name)) || a.d - b.d)[0];
+    addPoly(ft.geometry, { place: 'square', name: near?.p.properties.name || null });
+  }
   for (const poly of polys) {
     if (!poly.tags.building) continue;
     const inside = pois.filter((p) => polyContains(poly, f.xy({ lng: p.geometry.coordinates[0], lat: p.geometry.coordinates[1] })));
@@ -377,20 +398,26 @@ export function fromTiles(map, { lat, lng }) {
 }
 
 /** Main entry. Never throws. */
-export async function placeContext({ lat, lng, accuracy = 20 }, { map = null, timeoutMs = 9000 } = {}) {
+export async function placeContext({ lat, lng, accuracy = 20 }, { map = null, timeoutMs = 9000, graceMs = 2500 } = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { kind: 'unknown', label: null, source: 'none' };
-  try {
-    if (navigator.onLine === false) throw new Error('offline');
-    const d = await fetchOsm(lat, lng, accuracy, { timeoutMs });
-    return classify({ lat, lng, accuracy }, { ...fromOverpass(d), source: 'overpass' });
-  } catch (e) {
-    stats.lastError = String(e?.message || e);
+  const osmP = (navigator.onLine === false ? Promise.reject(new Error('offline')) : fetchOsm(lat, lng, accuracy, { timeoutMs }))
+    .then((d) => classify({ lat, lng, accuracy }, { ...fromOverpass(d), source: 'overpass' }))
+    .catch((e) => { stats.lastError = String(e?.message || e); return null; });
+  const tiles = async () => {
     try {
-      if (map && !(map.loaded?.() && map.areTilesLoaded?.())) await new Promise((res) => { const t = setTimeout(res, 3000); map.once('idle', () => { clearTimeout(t); res(); }); });
-      const t = fromTiles(map, { lat, lng }); if (t && (t.polys.length || t.roads.length)) return classify({ lat, lng, accuracy }, { ...t, source: 'tiles' });
-    } catch { /* ignore */ }
-    return { kind: 'unknown', label: null, source: 'none', error: stats.lastError };
-  }
+      if (!map) return null;
+      // the alive map repaints forever (never 'idle'), so wait on the tiles themselves, max 3 s
+      for (let i = 0; i < 15 && map.areTilesLoaded && !map.areTilesLoaded(); i++) await new Promise((r) => setTimeout(r, 200));
+      const t = fromTiles(map, { lat, lng }); return t && (t.polys.length || t.roads.length) ? classify({ lat, lng, accuracy }, { ...t, source: 'tiles' }) : null;
+    } catch { return null; }
+  };
+  // Overpass first, but don't leave the chip empty while it hangs: after graceMs the map's own tiles answer
+  // (Overpass keeps going in the background and warms the cache for the next drop here).
+  const first = await Promise.race([osmP, new Promise((r) => setTimeout(() => r('grace'), map ? graceMs : timeoutMs + 1000))]);
+  if (first && first !== 'grace') return first;
+  const t = await tiles(); if (t?.label) return t;
+  const o = first === 'grace' ? await osmP : null; if (o) return o;
+  return t || { kind: 'unknown', label: null, source: 'none', error: stats.lastError };
 }
 /** Nearest entrance (from a list) to a position: { name, distM, bearing } */
 export function nearestEntrance(entrances, from) {
@@ -437,9 +464,10 @@ export function toTraxCtx(ctx) {
   if (!ctx || ctx.kind === 'unknown') return null;
   if (ctx.mapbox && ctx.source === 'mapbox' && !ctx.snapped) return ctx.mapbox;
   const named = ctx.name && !/^(a|an) /.test(ctx.name) ? ctx.name : null;
-  const setting = ctx.kind === 'indoor' ? 'indoors' : ctx.kind === 'road' ? 'street' : 'outdoors';
-  return { setting, label: ctx.kind === 'park' ? 'park' : ctx.label || '', venue: ctx.kind === 'indoor' ? named : null,
-    road: ctx.kind === 'road' && named ? { name: named } : ctx.road || null, nearby: ctx.kind === 'outdoor' && named ? [{ name: named }] : [],
+  const setting = ctx.kind === 'indoor' ? 'indoors' : ctx.kind === 'road' ? 'street' : ctx.kind === 'park' ? 'park' : 'outdoors';
+  return { setting, label: ctx.label || '', venue: ctx.kind === 'indoor' ? named : null, park: ctx.kind === 'park' ? named : null,
+    road: ctx.kind === 'road' && named ? { name: named } : ctx.road || null,
+    nearby: ctx.kind === 'outdoor' && named ? [{ name: named, distanceM: ctx.square ? 0 : Math.round(ctx.road?.distM ?? 0) }] : [],
     floorHint: ctx.floorHint || null };
 }
 const BLDG_WORD = (t) => (!t || /^building/.test(t) ? 'a building' : TYPE_WORD[t] || `a ${t.replace(/_/g, ' ')} building`);
@@ -463,7 +491,7 @@ export function fromMapbox(c, fix) {
     out.snapReason = sd.reason;
     return out;
   }
-  if (/park|grass|pitch|cemetery|wood/.test(c.label || '')) return { ...base, kind: 'park', name: c.nearby?.[0]?.name ? `a park near ${c.nearby[0].name}` : 'a park', label: 'In a park' };
+  if (c.setting === 'park') return { ...base, kind: 'park', name: c.park || 'a park', label: c.park ? `In ${c.park}` : 'In a park' };
   const near = c.nearby?.[0]?.name || roadName;
   return { ...base, kind: 'outdoor', name: near || null, label: near ? `Near ${near}` : null };
 }

@@ -25,6 +25,10 @@ export function parseTilequery(json, fix) {
   const drive = roads.find((r) => DRIVE.has(r.p.class));
   const pois = feats.filter((f) => f.layer === 'poi_label' && f.p.name).sort((a, b) => a.d - b.d);
   const land = feats.find((f) => f.layer === 'landuse' && f.d < 0.5);
+  const GREEN = /^(park|grass|garden|wood|scrub|pitch|cemetery|wetland|national_park|playground|golf_course|sand|glacier)$/;
+  const parkLand = feats.find((f) => f.layer === 'landuse' && GREEN.test(f.p.class || '') && f.d < 0.5)
+    || (land && GREEN.test(land.p.class || '') ? land : null);
+  const parkName = pois.find((f) => f.p.class === 'park_like' && f.d < 150)?.p.name || null;
   const levelRx = /\b(?:level|lvl|floor)\s*([A-Z]?\d{1,2})\b/i;
   const levelRoad = roads.find((r) => levelRx.test(r.p.name || ''));
   const indoorWalk = roads.find((r) => r.d < 25 && (r.p.class === 'path' || r.p.class === 'pedestrian') && levelRx.test(r.p.name || ''));
@@ -32,7 +36,7 @@ export function parseTilequery(json, fix) {
   const building = bInside[0] ? { type: bInside.find((b) => b.p.type && b.p.type !== 'building:part')?.p.type || bInside[0].p.type || 'building', heightM: Math.max(...bInside.map((b) => b.p.height || 0)) || null } : null;
 
   const onRoad = !building && !!drive && drive.d < 6;
-  const setting = building || indoorWalk ? 'indoors' : onRoad ? 'street' : 'outdoors';
+  const setting = building || indoorWalk ? 'indoors' : onRoad ? 'street' : parkLand ? 'park' : 'outdoors';
   const venue = setting === 'indoors' ? (venueName || (BIG.has(building?.type) && pois[0]?.p.class === 'store_like' ? 'shopping area' : null)) : null;
   const floorHint = indoorWalk ? (indoorWalk.p.name.match(levelRx)?.[1] ?? null) : null;
 
@@ -40,16 +44,18 @@ export function parseTilequery(json, fix) {
   if (onRoad && bNear[0]) snap = { building: bNear[0].p.type || 'building', edgeM: bNear[0].d, point: nudgeInside(fix, bNear[0].at) };
   const label = setting === 'indoors'
     ? `Inside ${venue || (building?.type && !/^building/.test(building.type) ? `a ${building.type} building` : 'a building')}${floorHint ? `, level ${floorHint}` : ''}`
-    : setting === 'street' ? `On ${drive.p.name || 'the street'}` : land?.p.class ? `Outside, ${land.p.class.replace(/_/g, ' ')}` : 'Outside';
+    : setting === 'street' ? `On ${drive.p.name || 'the street'}`
+    : setting === 'park' ? (parkName ? `In ${parkName}` : 'In a park')
+    : pois[0] && pois[0].d < 40 ? `Near ${pois[0].p.name}` : 'Outside';
 
-  return { setting, label, venue, building, floorHint, onRoad, road: drive ? { name: drive.p.name || null, class: drive.p.class, distanceM: drive.d } : null,
+  return { setting, label, venue, park: setting === 'park' ? parkName : null, building, floorHint, onRoad, road: drive ? { name: drive.p.name || null, class: drive.p.class, distanceM: drive.d } : null,
     nearby: pois.slice(0, 5).map((f) => ({ name: f.p.name, kind: f.p.class, distanceM: Math.round(f.d) })), snap };
 }
 
 export async function placeContext(fix, { token, radiusM = 40, fetchImpl = globalThis.fetch, signal } = {}) {
   if (!token || fix?.lat == null) return null;
   const r = Math.min(60, Math.max(radiusM, Math.min(fix.accuracy ?? 0, 60)));
-  const url = `https://api.mapbox.com/v4/mapbox.mapbox-streets-v8/tilequery/${fix.lng},${fix.lat}.json?radius=${r}&limit=40&dedupe=true&layers=building,road,poi_label,landuse&access_token=${encodeURIComponent(token)}`;
+  const url = `https://api.mapbox.com/v4/mapbox.mapbox-streets-v8/tilequery/${fix.lng},${fix.lat}.json?radius=${r}&limit=40&dedupe=true&layers=building,road,poi_label,landuse,landuse_overlay&access_token=${encodeURIComponent(token)}`;
   try { const res = await fetchImpl(url, { signal }); return res.ok ? parseTilequery(await res.json(), fix) : null; } catch { return null; }
 }
 
@@ -66,7 +72,6 @@ export function snapDrop(fix, ctx) {
 // Map a context onto night crawler's 004 drop fields: dropEcho({ ...toDropPlace(ctx, { blurred }) }).
 // placeKind: building|road|park|other; placeName <=120 chars; level: integer -10..200 ("B1" -> -1, "P2" -> -2).
 // Blurred drops send only the kind (a building name or floor would undo the blur).
-const PARKISH = /park|grass|garden|wood|scrub|pitch|cemetery|wetland|sand|national_park|playground|golf/;
 export function levelFromHint(h) {
   if (h == null) return null;
   const m = String(h).trim().match(/^([A-Za-z]?)(\d{1,3})$/); if (!m) return null;
@@ -76,9 +81,9 @@ export function levelFromHint(h) {
 export function toDropPlace(ctx, { blurred = false } = {}) {
   if (!ctx) return {};
   const placeKind = ctx.setting === 'indoors' ? 'building' : ctx.setting === 'street' ? 'road'
-    : PARKISH.test(ctx.label?.toLowerCase() || '') ? 'park' : 'other';
+    : ctx.setting === 'park' ? 'park' : 'other';
   if (blurred) return { placeKind };
-  const name = ctx.setting === 'indoors' ? ctx.venue || ctx.nearby?.[0]?.name || null : ctx.setting === 'street' ? ctx.road?.name || null : ctx.nearby?.[0]?.name || null;
+  const name = ctx.setting === 'indoors' ? ctx.venue || ctx.nearby?.[0]?.name || null : ctx.setting === 'street' ? ctx.road?.name || null : ctx.setting === 'park' ? ctx.park || null : ctx.nearby?.[0]?.distanceM < 40 ? ctx.nearby[0].name : null;
   const out = { placeKind };
   if (name) out.placeName = String(name).slice(0, 120);
   const level = levelFromHint(ctx.floorHint); if (level != null) out.level = level;
