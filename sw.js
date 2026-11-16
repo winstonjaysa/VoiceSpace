@@ -1,6 +1,6 @@
 // Simple service worker: precache the app shell, network-first for same-origin GETs (fresh deploys win),
 // cache fallback when offline. Cross-origin requests (map tiles, MapLibre, Supabase) are not touched.
-const VERSION = 'echolocation-v8.0-cherry';
+const VERSION = 'echolocation-v8.1-cherry';
 const SHELL = [
   './', './index.html', './manifest.json',
   './css/app.css', './css/record.css',

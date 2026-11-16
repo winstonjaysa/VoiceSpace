@@ -369,3 +369,5 @@ svg { display: block; }
 .toast { width: max-content; text-align: left; }
 .drawer-body { transition: opacity .25s var(--ease); }
 .drawer[data-snap="0"] .drawer-body { opacity: 0; pointer-events: none; }
+.recenter { min-height: 44px; }
+.drawer-open .recenter { opacity: 0; pointer-events: none; }
