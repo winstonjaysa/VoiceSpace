@@ -1,15 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#07080b"/>
-  <g transform="translate(256 256) scale(1)" fill="none" stroke-linecap="round">
-    <g stroke="#5fe0bf" stroke-width="16">
-      <path d="M-54 -54 A76 76 0 0 1 54 -54"/><path d="M-54 54 A76 76 0 0 0 54 54"/>
-    </g>
-    <g stroke="#5fe0bf" stroke-opacity="0.7" stroke-width="16">
-      <path d="M-85 -85 A120 120 0 0 1 85 -85"/><path d="M-85 85 A120 120 0 0 0 85 85"/>
-    </g>
-    <g stroke="#5fe0bf" stroke-opacity="0.45" stroke-width="16">
-      <path d="M-116 -116 A164 164 0 0 1 116 -116"/><path d="M-116 116 A164 164 0 0 0 116 116"/>
-    </g>
-    <circle r="40" fill="#ff5a6e" stroke="none"/>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="75%"><stop offset="0" stop-color="#121722"/><stop offset="1" stop-color="#040507"/></radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#e9f6ff" stop-opacity=".9"/><stop offset=".25" stop-color="#8fd3e8" stop-opacity=".45"/><stop offset="1" stop-color="#8fd3e8" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="150" fill="url(#glow)"/>
+  <g fill="none" stroke="#dbeef7" stroke-linecap="round">
+    <circle cx="256" cy="256" r="92" stroke-opacity=".55" stroke-width="5"/>
+    <circle cx="256" cy="256" r="140" stroke-opacity=".3" stroke-width="4"/>
+    <circle cx="256" cy="256" r="188" stroke-opacity=".14" stroke-width="3"/>
   </g>
+  <circle cx="256" cy="256" r="24" fill="#f6f9ff"/>
 </svg>

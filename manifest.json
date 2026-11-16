@@ -1,14 +1,14 @@
 {
   "name": "Echolocation",
   "short_name": "Echolocation",
-  "description": "Drop short voice Echoes where you stand. Find them by walking.",
+  "description": "Drop short voice Echoes where you stand. Everyone sees the glow; only those who walk there can hear it.",
   "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#07080b",
-  "theme_color": "#07080b",
+  "background_color": "#050608",
+  "theme_color": "#050608",
   "categories": [
     "social",
     "music"
