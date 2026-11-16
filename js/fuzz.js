@@ -1,5 +1,5 @@
 // fuzz.js: turns an exact Echo position into a stable "glow" on the map, never the exact point.
-// Each Echo gets a blob 30–60 m in radius whose centre is shifted 15–75 % of that radius in a direction
+// Each Echo gets a blob 30–60 m in radius whose centre is shifted 30–80 % of that radius in a direction
 // derived from the echo id, so the true spot is always inside the glow but never at its centre, and the
 // blob does not jump around between refreshes.
 //
@@ -35,7 +35,7 @@ export function destPoint(lat, lng, brgDeg, distM) {
 export function fuzzPoint(id, lat, lng) {
   const [u1, u2, u3] = uniforms(String(id));
   const radiusM = FUZZ_MIN_R + (FUZZ_MAX_R - FUZZ_MIN_R) * u1;
-  const c = destPoint(lat, lng, 360 * u3, radiusM * (0.15 + 0.6 * u2));
+  const c = destPoint(lat, lng, 360 * u3, radiusM * (0.3 + 0.5 * u2));
   // round to ~1 m so the stored value carries no extra precision
   return { lat: Math.round(c.lat * 1e5) / 1e5, lng: Math.round(c.lng * 1e5) / 1e5, radiusM: Math.round(radiusM * 10) / 10 };
 }

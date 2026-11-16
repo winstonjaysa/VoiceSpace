@@ -25,7 +25,7 @@ alter table public.echo_private_salt enable row level security;
 revoke all on table public.echo_private_salt from public, anon, authenticated;
 
 -- 2. fuzz helper: stable per echo, keyed on the secret salt -------------------------
---    radius 30–60 m; centre moved 15–75 % of the radius in a salted direction; rounded to ~1 m.
+--    radius 30–60 m; centre moved 30–80 % of the radius in a salted direction; rounded to ~1 m.
 create or replace function public._echo_fuzz(p_id uuid, p_loc extensions.geography)
 returns table (lat double precision, lng double precision, radius_m double precision)
 language plpgsql stable security definer set search_path = '' as $$
@@ -38,7 +38,7 @@ begin
   u2 := ('x' || lpad(substr(h, 9, 8), 16, '0'))::bit(64)::bigint / 4294967296.0;
   u3 := ('x' || lpad(substr(h, 17, 8), 16, '0'))::bit(64)::bigint / 4294967296.0;
   r  := 30 + 30 * u1;
-  c  := extensions.st_project(p_loc, r * (0.15 + 0.6 * u2), radians(360 * u3));
+  c  := extensions.st_project(p_loc, r * (0.3 + 0.5 * u2), radians(360 * u3));
   lat := round(extensions.st_y(c::extensions.geometry)::numeric, 5)::double precision;
   lng := round(extensions.st_x(c::extensions.geometry)::numeric, 5)::double precision;
   radius_m := round(r::numeric, 1)::double precision;
