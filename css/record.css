@@ -65,6 +65,7 @@
 .blur-toggle input:checked + .switch { background: linear-gradient(90deg, var(--ice), var(--lav)); }
 .blur-toggle input:checked + .switch::after { transform: translateX(18px); }
 .blur-toggle input:focus-visible + .switch { outline: 2px solid var(--ice); outline-offset: 2px; }
+.blur-text { text-align: left; flex: 1; min-width: 0; }
 .blur-text strong { display: block; font-size: 14.5px; font-weight: 600; }
 .blur-text small { display: block; font-size: 12.5px; color: var(--muted); }
 .rec[data-queued="1"] .rec-confirm .eyebrow, .rec[data-queued="1"] .rec-confirm h2 { color: var(--warm); }
