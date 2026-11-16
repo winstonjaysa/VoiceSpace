@@ -63,7 +63,13 @@ export function normalizeDropInput(input = {}) {
     altitude: pick(input.altitude, input.altitudeM, input.altitude_m) ?? null,
     caption: pick(input.caption) ?? null,
     blurred: Boolean(pick(input.blurred, input.blur)),
-    placeLabel: pick(input.placeLabel, input.place_label) ?? null,   // "Blur my spot": show a 30–60 m glow instead of the exact pin
+    placeLabel: pick(input.placeLabel, input.place_label) ?? null,
+    // migration-v2 extras (trax's modules): sent only once v2 is installed, see supabaseBackend.dropEcho
+    transcript: pick(input.transcript) ?? null,
+    tags: Array.isArray(input.tags) && input.tags.length ? input.tags.slice(0, 8) : null,
+    parentId: pick(input.parentId, input.parent_id) ?? null,
+    unlockAt: pick(input.unlockAt, input.unlock_at) ?? null,
+    trailId: pick(input.trailId, input.trail_id) ?? null,   // "Blur my spot": show a 30–60 m glow instead of the exact pin
   };
 }
 
@@ -281,7 +287,8 @@ function fromServerRow(r, extra = {}) {
 const supabaseBackend = {
   name: 'supabase',
 
-  async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude, caption, blurred, placeLabel }) {
+  async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude, caption, blurred, placeLabel,
+    transcript, tags, parentId, unlockAt, trailId }) {
     validateDrop({ blob, lat, lng });
     // echoes-client derives the type from blob.type; make sure it carries the recorder's mimeType.
     const typed = blob.type ? blob : new Blob([blob], { type: mimeType || 'audio/webm' });
@@ -289,9 +296,19 @@ const supabaseBackend = {
     // migration-v2 live (map_echoes answered): send blurred + place_label as columns. Before it, drop_echo has no
     // such parameters, so call it exactly like v1 and keep the blur choice as a caption marker (maps read it back).
     // A blurred drop must never rely on a stale "v2 missing" cache: re-check right before writing the marker.
-    const v2 = mapMode === 'map_echoes' || (blurred ? await probeV2({ force: true }) : false);
+    const needsV2 = Boolean(parentId || unlockAt || trailId);
+    const v2 = mapMode === 'map_echoes' || (blurred || needsV2 ? await probeV2({ force: true }) : false);
+    if (needsV2 && !v2) throw new SupabaseError(V2_HINT, { code: 'V2_MISSING' });
     const args = { blob: typed, lat, lng, accuracyM, heading, altitude, durationS };
-    if (v2) Object.assign(args, { caption, placeLabel: placeLabel || null, blurred: Boolean(blurred) });
+    if (v2) {
+      Object.assign(args, { caption, placeLabel: placeLabel || null, blurred: Boolean(blurred) });
+      // transcript/tags/reply/capsule/trail go through drop_echo_v2; a drop never fails just for lack of a transcript
+      if (transcript) args.transcript = transcript;
+      if (tags?.length) args.tags = tags;
+      if (parentId) args.parentId = parentId;
+      if (unlockAt) args.unlockAt = unlockAt;
+      if (trailId) args.trailId = trailId;
+    }
     else args.caption = blurred ? withBlurMarker(caption) : caption;
     const id = await sb(() => sbClient.dropEcho(args));
     const blurVia = blurred ? (v2 ? 'column' : 'caption') : null;
@@ -302,6 +319,8 @@ const supabaseBackend = {
       resonance_count: 0, audio_path: null, duration_ms: Math.round(durationMs || 0),
       mime_type: (typed.type || '').split(';')[0], source: 'supabase',
       blurred: Boolean(blurred), blur_via: blurVia, place_label: placeLabel || null,
+      parent_id: v2 ? parentId || null : null, unlock_at: v2 ? unlockAt || null : null, trail_id: v2 ? trailId || null : null,
+      tags: v2 ? tags || null : null, transcript: v2 ? transcript || null : null,
     };
   },
 
@@ -664,6 +683,7 @@ async function runProbe() {
     await sb(() => sbClient.mapEchoes({ minLat: 0, minLng: 0, maxLat: 0.0001, maxLng: 0.0001 }));
     mapMode = 'map_echoes';
     try { sessionStorage.removeItem(MAP_PROBE_KEY); } catch { /* ignore */ }
+    events.dispatchEvent(new CustomEvent('v2', { detail: { available: true } }));
     return true;
   } catch (e) {
     if (!(e instanceof SupabaseError) || !['V2_MISSING', 'SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
@@ -694,6 +714,13 @@ export async function supabaseClient() {
   try { return await sbReady(); } catch { return null; }       // init() resolves to the supabase-js client
 }
 
+export const V2_HINT = 'This needs the backend update (migration-v2.sql), which isn\u2019t installed yet.';
+/** Ready night crawler v2 client (for trax's modules: trails, threads). Null while the backend is unavailable. */
+export async function v2Client() {
+  if (supabaseDown || !(await probeV2())) return null;
+  await sbReady(); return sbClient;
+}
+
 /** "Blur my spot" before migration-v2: drop_echo has no blurred column yet, so the choice rides in the caption. */
 export const BLUR_MARKER = '[[blur]]';
 export const withBlurMarker = (c) => {
@@ -720,6 +747,7 @@ function mapRecord(r, fuzz = 'client') {
       created_at: r.createdAt ?? r.created_at ? new Date(r.createdAt ?? r.created_at).toISOString() : null,
       expires_at: r.expiresAt ?? r.expires_at ? new Date(r.expiresAt ?? r.expires_at).toISOString() : null,
       place_label: r.placeLabel ?? r.place_label ?? null, fuzz: 'server', mine: isMine(r.id),
+      reply_count: r.replyCount ?? r.reply_count ?? 0, listen_count: r.listenCount ?? r.listen_count ?? 0, tags: r.tags ?? [],
     };
   }
   const lat = r.echo_lat ?? r.lat, lng = r.echo_lng ?? r.lng;
@@ -752,6 +780,7 @@ export async function mapEchoes(bounds) {
       mapProbeAt = now;
       try {
         const rows = await sb(() => sbClient.mapEchoes(b));
+        if (mapMode !== 'map_echoes') setTimeout(() => events.dispatchEvent(new CustomEvent('v2', { detail: { available: true } })), 0);
         mapMode = 'map_echoes';
         try { sessionStorage.removeItem(MAP_PROBE_KEY); } catch { /* ignore */ }
         return rows.map((r) => ({ ...mapRecord(r, 'server'), source: 'supabase' }));

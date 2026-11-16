@@ -7,6 +7,7 @@ import { createMapFeed } from './map-feed.js';
 import { mountRecordScreen } from './record.js';
 import { openHunt, fmtDist } from './listen.js';
 import { APP_VERSION, APP_BUILD, SW_CACHE } from './config.js';
+import { canReplyHere, loadThread, startTrail, createTrailWalk, trailsNearMe } from './v2/index.js';
 
 const $ = (s) => document.querySelector(s);
 const body = document.body;
@@ -15,7 +16,7 @@ const els = {
   live: $('[data-live]'), liveText: $('[data-live-text]'), toast: $('[data-toast]'),
   fab: $('[data-record]'), listenBtn: $('[data-listen]'), locate: $('[data-locate]'),
   gps: $('[data-gps-pill]'), gpsText: $('[data-gps-text]'), outbox: $('[data-outbox]'), outboxText: $('[data-outbox-text]'),
-  recenter: $('[data-recenter]'), about: $('[data-about]'), aboutOpen: $('[data-about-open]'), skeleton: $('[data-skeleton]'),
+  recenter: $('[data-recenter]'), trailwalk: $('[data-trailwalk]'), about: $('[data-about]'), aboutOpen: $('[data-about-open]'), skeleton: $('[data-skeleton]'),
 };
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const params = new URLSearchParams(location.search);
@@ -136,6 +137,7 @@ function startGeo() {
       else if (Date.now() - lastFollowAt > 1200) { lastFollowAt = Date.now(); view.follow(me); }
     }
     if (cardId) renderCard(cardId);
+    if (trailWalk) trailWalk.update(me);
   }, (err) => {
     if (err.code === 1) {
       geoWatch = null; setGps('off', 'GPS off', 'Location is off. Tap to turn it on.');
@@ -201,12 +203,88 @@ function renderCard(id) {
     </dl>
     <div class="life" role="img" aria-label="Time left: ${esc(left(e.expires_at))}"><i style="transform:scaleX(${lifeFrac.toFixed(3)})"></i></div>
     <p class="card-note">${note}</p>
+    ${queued ? '' : replyRow(e)}
+    <div class="thread" data-thread hidden></div>
     <div class="row">
       ${e.mine ? `<button class="btn" data-retract>${queued ? 'Cancel upload' : 'Take it back'}</button>` : ''}
       ${queued ? '' : `<button class="btn primary" data-walk aria-label="Walk to this echo and listen">`}
         ${queued ? '' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l6 16-6-4-6 4z"/></svg>Walk to it</button>'}
     </div>`;
 }
+// ------------------------------------------------------------------ v2 (trax): replies, threads, trails
+const v2On = () => store.mapMode === 'map_echoes';
+function replyRow(e) {
+  if (!v2On()) {
+    return `<div class="row v2-row"><button class="btn small" disabled aria-describedby="v2hint">Reply here</button>
+      <p class="v2-hint" id="v2hint">Replies, threads, capsules and trails arrive with the backend update.</p></div>`;
+  }
+  const chk = me ? canReplyHere(e, me) : { ok: false, reason: 'no-fix' };
+  const label = chk.ok ? 'Reply here' : chk.reason === 'too-far' ? `Reply \u00b7 walk ${Math.ceil(chk.moveM)} m closer` : 'Reply here';
+  const n = e.reply_count || 0;
+  return `<div class="row v2-row">
+    <button class="btn small" data-reply ${chk.ok ? '' : 'aria-disabled="true"'}>${label}</button>
+    <button class="btn small" data-thread-open ${n ? '' : 'disabled'}>${n ? `Thread \u00b7 ${n}` : 'No replies yet'}</button></div>`;
+}
+async function showThread(e) {
+  const box = els.card.querySelector('[data-thread]'); if (!box) return;
+  box.hidden = false; box.innerHTML = '<div class="card-skel"></div><div class="card-skel" style="width:70%"></div>';
+  try {
+    const client = await store.v2Client(); if (!client) throw new Error(store.V2_HINT);
+    const rows = await loadThread(client, e.parent_id || e.id, me || e);
+    box.innerHTML = rows.length ? `<ol aria-label="Replies">${rows.map((r) => `<li><button class="thread-item" data-thread-walk="${r.id}">
+      <span>Reply \u00b7 ${esc(ago(r.createdAt))}</span><span>${r.distanceM != null ? fmtDist(r.distanceM) : ''}</span></button></li>`).join('')}</ol>`
+      : '<p class="v2-hint">No replies yet. Walk there and leave the first.</p>';
+    box._rows = rows;
+  } catch (err) { box.innerHTML = `<p class="v2-hint">${esc(err.friendly || err.message)}</p>`; toast(`Couldn\u2019t load the thread: ${err.friendly || err.message}`); }
+}
+
+// trails: an active trail (new drops become its stops) and a trail walk (next stop, distance, direction, progress)
+const TRAIL_KEY = 'echolocation.activeTrail';
+let activeTrail = (() => { try { return JSON.parse(localStorage.getItem(TRAIL_KEY)); } catch { return null; } })();
+function setActiveTrail(t) { activeTrail = t; try { t ? localStorage.setItem(TRAIL_KEY, JSON.stringify(t)) : localStorage.removeItem(TRAIL_KEY); } catch { /* ignore */ } }
+let trailWalk = null;
+async function walkTrail(trail) {
+  try {
+    const client = await store.v2Client(); if (!client) throw new Error(store.V2_HINT);
+    trailWalk = createTrailWalk({ client, trailId: trail.id, onState: renderTrailWalk });
+    trailWalk.trail = trail;
+    await trailWalk.load();
+    if (me) trailWalk.update(me);
+    closeAbout(); els.trailwalk.hidden = false;
+  } catch (err) { trailWalk = null; toast(`Couldn\u2019t start the trail: ${err.friendly || err.message}`, 3600); }
+}
+function renderTrailWalk(st) {
+  if (!trailWalk || !st) return;
+  const n = st.stops.length, k = Math.min(st.index + 1, n);
+  const rel = st.bearingDeg == null ? 0 : st.bearingDeg - (Number.isFinite(currentHeading()) ? currentHeading() : 0);
+  els.trailwalk.innerHTML = st.done ? `
+    <div class="tw-head"><span class="eyebrow">Trail complete</span><strong>${esc(st.name || trailWalk.trail.name)}</strong></div>
+    <div class="life"><i style="transform:scaleX(1)"></i></div>
+    <div class="row"><button class="btn small" data-tw-end>Done</button></div>`
+    : n === 0 ? `<div class="tw-head"><span class="eyebrow">Trail</span><strong>${esc(trailWalk.trail.name)}</strong></div>
+      <p class="v2-hint">No visible stops yet.</p><div class="row"><button class="btn small" data-tw-end>Close</button></div>` : `
+    <div class="tw-head">
+      <svg class="tw-arrow" viewBox="0 0 24 24" style="transform:rotate(${rel.toFixed(0)}deg)" aria-hidden="true"><path d="M12 3l6 16-6-4-6 4z"/></svg>
+      <div><span class="eyebrow">${esc(st.name || trailWalk.trail.name)} \u00b7 stop ${k} of ${n}</span>
+      <strong data-tw-dist>${st.arrived ? 'You\u2019re at the stop' : st.distanceM != null ? `${fmtDist(st.distanceM)} to the next stop` : 'Finding you\u2026'}</strong>
+      ${st.next?.placeLabel ? `<span class="tw-place">${esc(st.next.placeLabel)}</span>` : ''}</div>
+    </div>
+    <div class="life" role="progressbar" aria-valuemin="0" aria-valuemax="${n}" aria-valuenow="${st.index}" aria-label="Trail progress"><i style="transform:scaleX(${st.progress.toFixed(3)})"></i></div>
+    <div class="row">
+      ${st.arrived ? '<button class="btn small primary" data-tw-listen>Listen</button><button class="btn small" data-tw-next>Next stop</button>' : '<button class="btn small" data-tw-skip>Skip</button>'}
+      <button class="btn small" data-tw-end aria-label="End trail walk">End</button>
+    </div>`;
+  els.trailwalk.dataset.arrived = st.arrived ? '1' : '';
+}
+els.trailwalk.addEventListener('click', (ev) => {
+  const b = ev.target.closest('button'); if (!b || !trailWalk) return;
+  const st = trailWalk.state();
+  if (b.matches('[data-tw-end]')) { trailWalk = null; els.trailwalk.hidden = true; }
+  else if (b.matches('[data-tw-skip]')) trailWalk.skip();
+  else if (b.matches('[data-tw-next]')) trailWalk.markVisited();
+  else if (b.matches('[data-tw-listen]') && st.next) startHunt(feed.get(st.next.id) || { id: st.next.id, lat: st.next.lat, lng: st.next.lng, radius_m: 0 });
+});
+
 function openCard(id) {
   cardId = id; renderCard(id);
   const e = feed.get(id);
@@ -220,6 +298,16 @@ els.card.addEventListener('click', async (ev) => {
   const t = ev.target.closest('button'); if (!t) return;
   if (t.matches('[data-card-close]')) closeCard();
   else if (t.matches('[data-walk]')) { const e = feed.get(cardId); closeCard(); startHunt(e); }  // sync: tap gesture
+  else if (t.matches('[data-reply]')) {
+    const e = feed.get(cardId); const chk = me ? canReplyHere(e, me) : { ok: false };
+    if (!chk.ok) { toast(chk.moveM != null ? `Walk ${Math.ceil(chk.moveM)} m closer to reply here` : 'Waiting for your location\u2026'); return; }
+    openRecord({ autoStart: true, replyTo: e });
+  }
+  else if (t.matches('[data-thread-open]')) showThread(feed.get(cardId));
+  else if (t.matches('[data-thread-walk]')) {
+    const r = (els.card.querySelector('[data-thread]')._rows || []).find((x) => x.id === t.dataset.threadWalk);
+    if (r) { closeCard(); startHunt(feed.get(r.id) || { id: r.id, lat: r.lat, lng: r.lng, radius_m: 0 }); }
+  }
   else if (t.matches('[data-retract]')) {
     t.disabled = true; t.textContent = 'Taking it back\u2026';
     const q = String(cardId).startsWith('q-');
@@ -234,13 +322,13 @@ function hideOverlay(el) {
   setTimeout(() => { el.hidden = true; if (els.record.hidden && els.listen.hidden) body.classList.remove('has-overlay'); }, reducedMotion ? 0 : 320);
 }
 
-function openRecord({ autoStart = true } = {}) {
+function openRecord({ autoStart = true, replyTo = null } = {}) {
   closeCard();
   recordApi?.destroy?.();
   showOverlay(els.record);
   startGeo();
   recordApi = mountRecordScreen(els.record, {
-    autoStart,
+    autoStart, replyTo, activeTrail: v2On() ? activeTrail : null,
     onClose: closeRecord,
     onToast: (m) => toast(m, 3600),
     onDropped: (echo) => {
@@ -324,6 +412,17 @@ function renderAbout() {
       <dt>Heading</dt><dd>${Number.isFinite(currentHeading()) ? `${Math.round(currentHeading())}\u00b0 (${compassHeading != null && Date.now() - compassAt < 3000 ? 'compass' : 'GPS course'})` : 'Not available'}</dd>
       <dt>Queued drops</dt><dd data-about-queue>\u2026</dd>
     </dl>
+    <section class="about-trails" aria-label="Trails">
+      <h3>Trails</h3>
+      ${v2On() ? `
+        <p class="muted">${activeTrail ? `New echoes are added to <strong>${esc(activeTrail.name)}</strong> (you can switch it off per drop).` : 'Chain your echoes into a walk others can follow.'}</p>
+        <div class="trail-new"><label class="sr" for="trail-name">Trail name</label>
+          <input id="trail-name" data-trail-name maxlength="80" placeholder="Name a new trail" autocomplete="off">
+          <button class="btn small" data-trail-create>Create</button></div>
+        <div class="row">${activeTrail ? '<button class="btn small" data-trail-stop>Stop adding</button>' : ''}<button class="btn small" data-trail-near>Trails near me</button></div>
+        <ul class="trail-list" data-trail-list></ul>`
+      : '<p class="v2-hint">Trails, replies and time capsules need the backend update (migration-v2.sql). They switch on by themselves once it\u2019s installed.</p>'}
+    </section>
     <p class="muted">Echoes are exact pins unless their author turned on \u201cBlur my spot\u201d. Map \u00a9 OpenStreetMap contributors, OpenFreeMap.</p>
     <div class="row"><button class="btn" data-about-close>Close</button></div>`;
   store.outboxCount().then((n) => { const q = els.about.querySelector('[data-about-queue]'); if (q) q.textContent = String(n); });
@@ -339,7 +438,34 @@ function closeAbout() {
   els.aboutOpen.focus();
 }
 els.aboutOpen.addEventListener('click', openAbout);
-els.about.addEventListener('click', (ev) => { if (ev.target.closest('[data-about-close]')) closeAbout(); });
+els.about.addEventListener('click', async (ev) => {
+  if (ev.target.closest('[data-about-close]')) { closeAbout(); return; }
+  const b = ev.target.closest('button'); if (!b) return;
+  try {
+    if (b.matches('[data-trail-create]')) {
+      const name = els.about.querySelector('[data-trail-name]').value;
+      const client = await store.v2Client(); if (!client) throw new Error(store.V2_HINT);
+      b.disabled = true;
+      const id = await startTrail(client, { name });
+      setActiveTrail({ id, name: name.trim().slice(0, 80) }); renderAbout();
+      toast(`Trail \u201c${activeTrail.name}\u201d created. Your next drops become its stops.`, 3600);
+    } else if (b.matches('[data-trail-stop]')) { setActiveTrail(null); renderAbout(); }
+    else if (b.matches('[data-trail-near]')) {
+      const client = await store.v2Client(); if (!client) throw new Error(store.V2_HINT);
+      const c = me || view?.map.getCenter(); const list = els.about.querySelector('[data-trail-list]');
+      list.innerHTML = '<li><div class="card-skel"></div></li>';
+      const trails = await trailsNearMe(client, { lat: c.lat, lng: c.lng, radiusM: 3000 });
+      list._trails = trails;
+      list.innerHTML = trails.length ? trails.map((t) => `<li><button class="thread-item" data-trail-walk="${esc(t.id)}">
+        <span>${esc(t.name)} \u00b7 ${t.stopCount} stop${t.stopCount === 1 ? '' : 's'}</span><span>${fmtDist(t.distanceM || 0)}</span></button></li>`).join('')
+        : '<li class="v2-hint">No trails within 3 km yet.</li>';
+    } else if (b.matches('[data-trail-walk]')) {
+      const t = (els.about.querySelector('[data-trail-list]')._trails || []).find((x) => String(x.id) === b.dataset.trailWalk);
+      if (t) walkTrail(t);
+    }
+  } catch (err) { b.disabled = false; toast(err.friendly || err.message, 3600); }
+});
+store.events.addEventListener('v2', () => { if (cardId) renderCard(cardId); if (!els.about.hidden) renderAbout(); });
 document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape') return;
   if (!els.about.hidden) closeAbout(); else if (cardId) closeCard();
@@ -400,7 +526,8 @@ async function boot() {
       else if (/Failed to fetch|NetworkError|AJAXError/i.test(m)) toast('Some map tiles didn\u2019t load.', 3000, 'tiles');
     },
   });
-  window.__echoApp = { store, feed, view, openCard, startHunt, openRecord, openAbout, setFollow,
+  window.__echoApp = { store, feed, view, openCard, startHunt, openRecord, openAbout, setFollow, walkTrail, setActiveTrail,
+    get trailWalk() { return trailWalk; },
     get me() { return me; }, get followMe() { return followMe; },
     get lastFix() { return lastRawFix ? { lat: lastRawFix.coords.latitude, lng: lastRawFix.coords.longitude, accuracy: lastRawFix.coords.accuracy, ts: lastRawFix.timestamp } : null; } };
   // drops made offline: retry now (app start) and whenever the connection comes back (store listens for 'online')

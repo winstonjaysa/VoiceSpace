@@ -5,7 +5,9 @@
 //       -> hold (or tap start/stop) the big button, max 30 s, live level meter
 //       -> preview / re-record -> "Drop here" -> confirmation (lat/lng/accuracy/expiry).
 
-import { dropEcho } from './echo-store.js';
+import * as store from './echo-store.js';
+import { createLiveTranscript, capsulePresets, opensIn, canReplyHere, replyTo as replyToEcho, dropOnTrail } from './v2/index.js';
+const { dropEcho } = store;
 import { MAX_RECORD_MS, GPS_GOOD_ACCURACY_M } from './config.js';
 import { preciseFix, placeLabel } from './precise-fix.js';
 
@@ -37,6 +39,8 @@ const TEMPLATE = `
   <div class="rec-main" data-main hidden>
     <div class="rec-timer" data-timer>0.0<small> / ${MAX_RECORD_MS / 1000} s</small></div>
     <div class="meter" aria-hidden="true"><div class="meter-fill" data-meter></div></div>
+    <p class="reply-banner" data-reply-banner hidden></p>
+    <p class="transcript" data-transcript aria-live="polite" hidden></p>
 
     <button class="rec-btn" data-rec aria-label="Hold to record">
       <span class="rec-aura" aria-hidden="true"></span>
@@ -55,6 +59,17 @@ const TEMPLATE = `
         <input type="checkbox" role="switch" data-blur aria-describedby="blur-help">
         <span class="switch" aria-hidden="true"></span>
         <span class="blur-text"><strong>Blur my spot</strong><small id="blur-help">Show a 30–60 m glow instead of the exact pin</small></span>
+      </label>
+      <div class="tags" data-tags aria-label="Tags" hidden></div>
+      <fieldset class="capsule" data-capsule>
+        <legend>Opens</legend>
+        <div class="chips" role="radiogroup" aria-label="When this echo opens" data-capsule-chips></div>
+        <small class="v2-hint" data-capsule-hint></small>
+      </fieldset>
+      <label class="blur-toggle" data-trail-row hidden>
+        <input type="checkbox" role="switch" data-trail checked>
+        <span class="switch" aria-hidden="true"></span>
+        <span class="blur-text"><strong data-trail-name>Add to trail</strong><small>Becomes the next stop on your trail</small></span>
       </label>
       <div class="row">
         <button class="btn" data-rerecord>Re-record</button>
@@ -105,7 +120,9 @@ export function pickMimeType() {
 }
 
 /** mountRecordScreen(root, { onClose, onDropped, autoStart, onToast }). autoStart: call it inside a tap to skip the gate. */
-export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => {}, autoStart = false, onToast = () => {} } = {}) {
+export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => {}, autoStart = false, onToast = () => {},
+  replyTo = null, activeTrail = null } = {}) {
+  const v2 = () => store.mapMode === 'map_echoes';
   root.innerHTML = TEMPLATE;
   const $ = (s) => root.querySelector(s);
   const el = {
@@ -115,6 +132,9 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     rec: $('[data-rec]'), ring: $('[data-ring]'), hint: $('[data-hint]'),
     review: $('[data-review]'), audio: $('[data-audio]'), rerecord: $('[data-rerecord]'),
     drop: $('[data-drop]'), warn: $('[data-warn]'), blur: $('[data-blur]'),
+    transcript: $('[data-transcript]'), tags: $('[data-tags]'), capsule: $('[data-capsule]'), chips: $('[data-capsule-chips]'),
+    capsuleHint: $('[data-capsule-hint]'), trailRow: $('[data-trail-row]'), trail: $('[data-trail]'), trailName: $('[data-trail-name]'),
+    replyBanner: $('[data-reply-banner]'),
     confirm: $('[data-confirm]'), another: $('[data-another]'), close: $('[data-close]'), see: $('[data-see]'),
   };
   let lastEcho = null, lastFix = null;
@@ -302,6 +322,10 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     s.recorder.onstop = onRecorderStop;
     s.audioCtx?.resume?.();
     s.recorder.start(250);
+    // live transcript + tags while recording (SpeechRecognition; silently absent where unsupported)
+    s.transcript = null; s.tags = [];
+    s.lt = createLiveTranscript({ onText: (t) => { el.transcript.hidden = !t; el.transcript.textContent = t; } });
+    if (s.lt.supported) { el.transcript.hidden = false; el.transcript.textContent = 'Listening for words\u2026'; s.lt.start(); }
     s.startTs = performance.now();
     navigator.vibrate?.(15);
     setPhase('recording');
@@ -312,6 +336,8 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     s.durationMs = Math.min(MAX_RECORD_MS, performance.now() - s.startTs);
     s.phase = 'stopping';
     if (s.recorder.state !== 'inactive') s.recorder.stop();
+    try { const r = s.lt?.stop({ caption: '' }) || {}; s.transcript = r.transcript || null; s.tags = r.tags || []; } catch { s.transcript = null; s.tags = []; }
+    renderExtras();
     navigator.vibrate?.([10, 40, 10]);
   }
 
@@ -338,6 +364,36 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     el.audio.removeAttribute('src'); el.audio.load?.();
   }
 
+  // ---------------------------------------------------------------- v2 extras: tags, capsule, trail, reply
+  function renderExtras() {
+    const on = v2();
+    if (s.transcript) { el.transcript.hidden = false; el.transcript.textContent = `\u201c${s.transcript}\u201d`; }
+    else el.transcript.hidden = true;
+    el.tags.hidden = !s.tags?.length;
+    el.tags.innerHTML = (s.tags || []).map((t) => `<span class="tag">#${t.replace(/[^a-z0-9_-]/g, '')}</span>`).join('')
+      + (s.tags?.length && !on ? '<small class="v2-hint">Tags are saved once the backend update is in.</small>' : '');
+    // time capsule presets with "opens in X"
+    const presets = [{ id: 'now', label: 'Now', at: null }, ...capsulePresets()];
+    s.capsuleId ||= 'now';
+    el.chips.innerHTML = presets.map((p) => `<button type="button" class="chip-btn" role="radio" data-cap="${p.id}"
+      aria-checked="${p.id === s.capsuleId}" ${on || p.id === 'now' ? '' : 'disabled'}>${p.label}${p.at ? `<small>${opensIn(p.at)}</small>` : ''}</button>`).join('');
+    el.chips.onclick = (ev) => {
+      const b = ev.target.closest('[data-cap]'); if (!b || b.disabled) return;
+      s.capsuleId = b.dataset.cap; s.unlockAt = presets.find((p) => p.id === s.capsuleId)?.at?.toISOString() || null;
+      renderExtras();
+    };
+    el.capsuleHint.textContent = !on ? 'Time capsules arrive with the backend update (migration-v2.sql).'
+      : s.unlockAt ? `Hidden until it ${opensIn(s.unlockAt).replace('opens', 'opens')}. Its 24 h starts then.` : '';
+    el.trailRow.hidden = !(activeTrail && on && !replyTo);
+    if (activeTrail) el.trailName.textContent = `Add to trail \u201c${activeTrail.name}\u201d`;
+    el.capsule.hidden = Boolean(replyTo);
+    if (replyTo) {
+      el.replyBanner.hidden = false;
+      el.replyBanner.textContent = on ? `Replying to the echo${replyTo.place_label ? ` near ${replyTo.place_label}` : ''}` : 'Replies need the backend update (migration-v2.sql).';
+    }
+  }
+  renderExtras();
+
   el.rerecord.addEventListener('click', () => { el.audio.pause(); clearClip(); setPhase('ready'); });
 
   // ---------------------------------------------------------------- drop
@@ -346,6 +402,11 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     el.drop.classList.remove('warn');
     if (errMsg) { el.drop.disabled = true; el.drop.textContent = 'No location'; el.warn.textContent = errMsg; return; }
     if (s.dropping) { el.drop.disabled = true; if (!s.locking) el.drop.textContent = 'Dropping\u2026'; return; }
+    if (replyTo && !v2()) { el.drop.disabled = true; el.drop.textContent = 'Replies not available yet'; el.warn.textContent = store.V2_HINT; return; }
+    if (replyTo && s.fix) {
+      const chk = canReplyHere(replyTo, { lat: s.fix.lat, lng: s.fix.lng, accuracy: s.fix.accuracy });
+      if (!chk.ok) { el.drop.disabled = true; el.drop.textContent = `Walk ${Math.ceil(chk.moveM)} m closer`; el.warn.textContent = 'Replies are dropped at the original echo (within 50 m).'; return; }
+    }
     if (!s.fix) {
       el.drop.disabled = true;
       el.drop.textContent = 'Waiting for GPS\u2026';
@@ -388,14 +449,20 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     el.drop.textContent = 'Dropping\u2026';
     const place = await Promise.race([labelP, new Promise((r) => setTimeout(() => r(null), 1500))]);
     try {
-      const echo = await dropEcho({
+      const args = {
         blurred: el.blur.checked, placeLabel: place || null,
+        transcript: s.transcript || null, tags: s.tags?.length ? s.tags : null,
+        unlockAt: !replyTo && v2() ? s.unlockAt || null : null, accuracy: fix.accuracy,
         blob: s.blob,
         mimeType: s.blob.type,
         durationMs: Math.round(s.durationMs),
         lat: fix.lat, lng: fix.lng, accuracyM: fix.accuracy,
         heading: s.heading, altitude: fix.altitude,
-      });
+      };
+      const shim = { dropEcho };                 // trax's helpers call client.dropEcho: route them through the store
+      const echo = replyTo ? await replyToEcho(shim, replyTo, args)
+        : activeTrail && v2() && el.trail.checked ? await dropOnTrail(shim, activeTrail.id, args)
+          : await dropEcho(args);
       navigator.vibrate?.([30, 60, 30, 60, 90]);
       lastFix = fix;
       showConfirmation(echo);
@@ -417,8 +484,10 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     else if (navigator.onLine === false) placeEl.textContent = 'Unnamed spot';
     else { placeEl.textContent = '\u2026'; placeLabel({ lat: echo.lat, lng: echo.lng }).then((l) => { placeEl.textContent = l || 'Unnamed spot'; }).catch(() => { placeEl.textContent = 'Unnamed spot'; }); }
     const q = Boolean(echo.queued);
-    root.querySelector('[data-c-eyebrow]').textContent = q ? 'Queued' : 'Dropped';
-    root.querySelector('[data-c-title]').textContent = q ? 'Queued, will upload' : 'Your echo is out there';
+    const sealed = echo.unlock_at || (q && echo.unlockAt);
+    root.querySelector('[data-c-eyebrow]').textContent = q ? 'Queued' : echo.parent_id ? 'Reply' : echo.trail_id ? 'Trail stop' : sealed ? 'Time capsule' : 'Dropped';
+    root.querySelector('[data-c-title]').textContent = q ? 'Queued, will upload' : echo.parent_id ? 'Your reply is in the thread'
+      : echo.trail_id ? `Stop added to \u201c${activeTrail?.name || 'your trail'}\u201d` : sealed ? `Sealed \u00b7 ${opensIn(sealed)}` : 'Your echo is out there';
     root.querySelector('[data-c-note]').textContent = (echo.blurred
       ? 'Blurred: the map shows a 30\u201360 m glow around this spot, not the exact pin.'
       : 'The map shows an exact pin here.') + ' It fades in 24 h unless listeners resonate with it.';
@@ -457,6 +526,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     setFix(pos) { if (pos?.coords && s.watchId != null) applyFix(pos); },
     // for the shell: release the mic when the screen is hidden for long, etc.
     destroy() {
+      try { s.lt?.stop(); } catch { /* ignore */ }
       cancelAnimationFrame(s.raf);
       if (s.watchId != null) navigator.geolocation.clearWatch(s.watchId);
       s.stream?.getTracks().forEach((t) => t.stop());
