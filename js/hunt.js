@@ -8,6 +8,7 @@
 //     works, IndexedDB fallback otherwise. storeSource() below (trax) is kept for stores without it.
 // nearby_echoes now returns real echo_lat/echo_lng, so the destPoint path below is only a safety net.
 import { createHunt } from './hunt-core.js';
+import { preciseFix } from './precise-fix.js';
 
 export const HUNT_IMPLEMENTED = true;
 
@@ -54,6 +55,23 @@ function storeSource(store) {
       return { expiresAt: Date.parse(r.expires_at), resonanceCount: Number.isFinite(r.resonance_count) ? r.resonance_count : undefined };
     },
   };
+  return src;
+}
+
+// Server gates (unlock <= 25 m, resonate <= 50 m) judge the position we send, so send the best one we can get:
+// a short precise lock (Cooker's precise-fix.js, ~2–3 s) when it beats the engine's live Kalman fix.
+async function sharpen(q = {}) {
+  try {
+    const p = await preciseFix({ windowMs: 3000, targetM: 8, minSamples: 2, maxAccuracyM: 30 });
+    if (!Number.isFinite(q.accuracyM) || p.accuracy < q.accuracyM) return { ...q, lat: p.lat, lng: p.lng, accuracyM: p.accuracy };
+  } catch { /* no better fix in time: keep the engine's */ }
+  return q;
+}
+function withPreciseGate(src, enabled) {
+  if (!enabled) return src;
+  const unlock = src.unlock, resonate = src.resonate;
+  src.unlock = async (id, q) => unlock.call(src, id, await sharpen(q));
+  src.resonate = async (id, q) => resonate.call(src, id, await sharpen(q));
   return src;
 }
 
@@ -120,7 +138,7 @@ export async function startHunt(container, { store, desk = new URLSearchParams(l
     [{ transform: 'scale(.35)', opacity: .75 * k }, { transform: 'scale(1.08)', opacity: 0 }], { duration: 1300, easing: 'cubic-bezier(.2,.6,.3,1)' });
 
   const base = typeof store.createHuntSource === 'function' ? store.createHuntSource() : storeSource(store);
-  const source = targetId ? targetedSource(base, targetId) : base;
+  const source = withPreciseGate(targetId ? targetedSource(base, targetId) : base, !desk);
   const hunt = createHunt({ source, onState: render, onPing: p => pulse(p.distanceM < 40 ? 1 : 0.7),
     options: { ...(targetId ? { searchRadiusM: 500 } : {}), ...(desk ? { useDeviceGeolocation: false, useDeviceCompass: false } : {}), ...options } });
   const started = hunt.start();                   // synchronous gesture-bound work happens here (iOS compass + audio)

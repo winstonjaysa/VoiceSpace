@@ -7,6 +7,7 @@
 
 import { dropEcho } from './echo-store.js';
 import { MAX_RECORD_MS, GPS_GOOD_ACCURACY_M } from './config.js';
+import { preciseFix, placeLabel } from './precise-fix.js';
 
 const RING_R = 92;
 const RING_C = 2 * Math.PI * RING_R;
@@ -64,6 +65,7 @@ const TEMPLATE = `
     <h2>Your echo is out there</h2>
     <p class="lede" data-c-source></p>
     <dl>
+      <dt>Near</dt><dd data-c-place></dd>
       <dt>Position</dt><dd><span data-c-lat></span>, <span data-c-lng></span></dd>
       <dt>Accuracy</dt><dd data-c-acc></dd>
       <dt>Heading</dt><dd data-c-heading></dd>
@@ -110,7 +112,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     drop: $('[data-drop]'), warn: $('[data-warn]'),
     confirm: $('[data-confirm]'), another: $('[data-another]'), close: $('[data-close]'), see: $('[data-see]'),
   };
-  let lastEcho = null;
+  let lastEcho = null, lastFix = null;
 
   const s = {
     phase: 'gate', stream: null, mimeType: null, recorder: null, chunks: [],
@@ -337,7 +339,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     if (s.phase !== 'review') return;
     el.drop.classList.remove('warn');
     if (errMsg) { el.drop.disabled = true; el.drop.textContent = 'No location'; el.warn.textContent = errMsg; return; }
-    if (s.dropping) { el.drop.disabled = true; el.drop.textContent = 'Dropping\u2026'; return; }
+    if (s.dropping) { el.drop.disabled = true; if (!s.locking) el.drop.textContent = 'Dropping\u2026'; return; }
     if (!s.fix) {
       el.drop.disabled = true;
       el.drop.textContent = 'Waiting for GPS\u2026';
@@ -359,7 +361,20 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
   el.drop.addEventListener('click', async () => {
     if (!s.blob || !s.fix || s.dropping) return;
     s.dropping = true; updateDropButton();
-    const fix = s.fix;
+    // Precise lock (Cooker's precise-fix.js): 3–8 s of fresh fixes, weak ones and multipath jumps dropped,
+    // accuracy-weighted average. Falls back to the live fix if the lock can't do better.
+    let fix = s.fix;
+    s.locking = true; el.drop.textContent = 'Locking position\u2026';
+    el.warn.textContent = 'Hold still for a few seconds while we pin the exact spot.';
+    try {
+      const p = await preciseFix({ windowMs: 8000, targetM: 6, minSamples: 3, maxAccuracyM: 30,
+        onProgress: (q) => { el.drop.textContent = `Locking \u00b1${q.accuracy} m \u00b7 ${q.samples} reading${q.samples === 1 ? '' : 's'}`; } });
+      if (p && (!Number.isFinite(fix.accuracy) || p.accuracy <= fix.accuracy || p.samples >= 3)) {
+        fix = { lat: p.lat, lng: p.lng, accuracy: p.accuracy, altitude: s.fix.altitude, ts: p.at, samples: p.samples, precise: true };
+      }
+    } catch (e) { console.info('[record] precise lock unavailable, using live fix:', e.message); }
+    s.locking = false;
+    el.drop.textContent = 'Dropping\u2026';
     try {
       const echo = await dropEcho({
         blob: s.blob,
@@ -369,6 +384,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
         heading: s.heading, altitude: fix.altitude,
       });
       navigator.vibrate?.([30, 60, 30, 60, 90]);
+      lastFix = fix;
       showConfirmation(echo);
     } catch (err) {
       el.warn.textContent = `Couldn't drop: ${err?.message || err}`;
@@ -380,7 +396,11 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
   function showConfirmation(echo) {
     root.querySelector('[data-c-lat]').textContent = echo.lat.toFixed(5);
     root.querySelector('[data-c-lng]').textContent = echo.lng.toFixed(5);
-    root.querySelector('[data-c-acc]').textContent = echo.accuracy_m != null ? `\u00b1${Math.round(echo.accuracy_m)} m` : 'unknown';
+    root.querySelector('[data-c-acc]').textContent = (echo.accuracy_m != null ? `\u00b1${Math.round(echo.accuracy_m)} m` : 'unknown')
+      + (lastFix?.precise ? ` \u00b7 locked from ${lastFix.samples} readings` : '');
+    const placeEl = root.querySelector('[data-c-place]');
+    placeEl.textContent = '\u2026';
+    placeLabel({ lat: echo.lat, lng: echo.lng }).then((l) => { placeEl.textContent = l || 'Unnamed spot'; });
     root.querySelector('[data-c-heading]').textContent = echo.heading != null ? `${Math.round(echo.heading)}\u00b0 ${cardinal(echo.heading)}` : 'n/a';
     const exp = new Date(echo.expires_at);
     root.querySelector('[data-c-exp]').textContent = exp.toLocaleString([], {
