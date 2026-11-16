@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-  <meta name="theme-color" content="#07080b">
+  <meta name="theme-color" content="#050608">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="Echolocation: drop short voice Echoes where you stand. Find them by walking.">
+  <meta name="description" content="Echolocation: drop short voice Echoes where you stand. Everyone sees the glow. Only those who walk there can hear it.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -14,27 +14,47 @@
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
   <link rel="apple-touch-icon" href="icons/icon.svg">
+  <link rel="preconnect" href="https://rsms.me">
+  <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
+  <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="css/app.css">
   <link rel="stylesheet" href="css/record.css">
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js" defer></script>
 </head>
 <body>
-  <main class="screens">
-    <!-- Record-and-drop screen: markup + logic live in js/record.js (self-contained, swappable). -->
-    <section id="screen-record" class="screen" aria-label="Record" hidden></section>
-    <!-- Listen screen: placeholder that hosts the hunt seam (js/listen.js -> js/hunt.js). -->
-    <section id="screen-listen" class="screen" aria-label="Listen" hidden></section>
-  </main>
+  <div id="map" class="map" aria-label="Map of echoes"></div>
+  <div class="map-shade" aria-hidden="true"></div>
 
-  <nav class="tabbar" aria-label="Main">
-    <a href="#record" data-tab="record">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
-      <span>Drop</span>
-    </a>
-    <a href="#listen" data-tab="listen">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8 8a5.6 5.6 0 0 0 0 8M16 8a5.6 5.6 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="2.6"/><path d="M10.5 10.5a7.8 7.8 0 0 0 0 11M21.5 10.5a7.8 7.8 0 0 1 0 11M6.6 6.6a13.3 13.3 0 0 0 0 18.8M25.4 6.6a13.3 13.3 0 0 1 0 18.8"/></svg>
+      <span>Echolocation</span>
+    </div>
+    <div class="live glass" data-live data-state="connecting" role="status">
+      <i aria-hidden="true"></i><span data-live-text>Connecting</span>
+    </div>
+  </header>
+
+  <nav class="dock" aria-label="Actions">
+    <button class="dock-btn glass" data-listen aria-label="Listen for the nearest echo">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="1.6"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6M5.2 5.2a9.6 9.6 0 0 0 0 13.6M18.8 5.2a9.6 9.6 0 0 1 0 13.6"/></svg>
       <span>Listen</span>
-    </a>
+    </button>
+    <button class="fab" data-record aria-label="Record an echo here">
+      <span class="fab-aura" aria-hidden="true"></span>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/></svg>
+    </button>
+    <button class="dock-btn glass" data-locate aria-label="Center on me">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/><circle cx="12" cy="12" r="7"/></svg>
+      <span>You</span>
+    </button>
   </nav>
+
+  <section class="sheet glass" id="card" data-card hidden aria-live="polite"></section>
+  <section class="overlay" id="screen-record" aria-label="Record an echo" hidden></section>
+  <section class="overlay" id="screen-listen" aria-label="Listen" hidden></section>
+  <div class="toast glass" data-toast role="status" hidden></div>
 
   <noscript><p class="noscript">Echolocation needs JavaScript.</p></noscript>
   <script type="module" src="js/app.js"></script>

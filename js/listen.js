@@ -1,52 +1,89 @@
-// Listen screen: intro + host for the hunt (js/hunt.js -> hunt-core.js). No map or list in the main app:
-// discovery happens by walking. Once the hunt starts, the intro hides and the hunt's ring fills the screen.
+// listen.js: the hunt overlay (v2). Opened from the map: "Walk to it" (one target echo) or "Listen" (nearest).
+// Hosts js/hunt.js -> hunt-core.js (night crawler's engine) unchanged. Exact echo positions are only ever known
+// inside the engine (nearby_echoes within 500 m); beyond that we guide toward the echo's fuzzy glow.
 import * as store from './echo-store.js';
 import { startHunt } from './hunt.js';
 
-export function mountListenScreen(root) {
+const R = 6371008.8, rad = (d) => d * Math.PI / 180;
+function haversine(a, b) {
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+function bearing(a, b) {
+  const y = Math.sin(rad(b.lng - a.lng)) * Math.cos(rad(b.lat));
+  const x = Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) - Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(rad(b.lng - a.lng));
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+export const fmtDist = (m) => (m >= 1000 ? `${(m / 1000).toFixed(m >= 10000 ? 0 : 1)} km` : `${Math.round(m / 5) * 5} m`);
+
+/**
+ * openHunt(root, { target, onClose, onState }) — MUST be called synchronously inside a tap (iOS audio + compass).
+ * target: a map record { id, lat, lng (fuzzed), radius_m, ... } or null for "nearest echo".
+ */
+export function openHunt(root, { target = null, onClose = () => {}, onState } = {}) {
   root.innerHTML = `
-    <div class="listen" data-listen>
-      <div class="listen-intro" data-intro>
-        <div class="listen-orb" aria-hidden="true"><span></span><span></span><span></span></div>
-        <h1>Listen</h1>
-        <p class="muted">Walk. Your phone pings faster as you near an Echo. Point it to tune in.</p>
-        <button class="btn primary big" data-start>Start listening</button>
-        <p class="muted small">Headphones help · hold your phone upright, like a lantern</p>
+    <div class="hunt" data-hunt-overlay>
+      <header class="hunt-top">
+        <button class="icon-btn" data-close aria-label="Stop listening">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+        <div class="hunt-title">
+          <span class="eyebrow">${target ? 'Walking to an echo' : 'Listening'}</span>
+          <strong data-title>${target ? 'Follow the sound' : 'Nearest echo'}</strong>
+        </div>
+        <span class="chip" data-chip></span>
+      </header>
+      <div class="hunt-stage" data-hunt></div>
+      <div class="hunt-guide" data-guide hidden>
+        <svg class="guide-arrow" data-arrow viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l6 16-6-4-6 4z"/></svg>
+        <div><strong data-gdist></strong><span data-gnote></span></div>
       </div>
-      <div class="listen-hunt" data-hunt-wrap hidden>
-        <button class="listen-stop" data-stop aria-label="Stop listening">&times;</button>
-        <div class="hunt-root" data-hunt></div>
-        <p class="muted small listen-status" data-nearby role="status"></p>
-      </div>
+      <p class="hunt-foot" data-foot role="status">Headphones help · hold your phone upright, like a lantern</p>
     </div>`;
   const $ = (s) => root.querySelector(s);
-  const intro = $('[data-intro]'), wrap = $('[data-hunt-wrap]'), huntEl = $('[data-hunt]'), nearbyEl = $('[data-nearby]');
-  let hunt = null;
+  const guide = $('[data-guide]'), arrow = $('[data-arrow]'), gdist = $('[data-gdist]'), gnote = $('[data-gnote]');
+  const chip = $('[data-chip]'), foot = $('[data-foot]');
+  let hunt = null, closed = false;
 
-  const onState = (s) => {
-    const n = s.echoesCount ?? 0;
-    nearbyEl.dataset.count = String(n);
-    nearbyEl.dataset.status = s.status;
-    nearbyEl.textContent = s.status === 'locating' || s.status === 'starting' ? ''
-      : `${n} Echo${n === 1 ? '' : 'es'} within reach`;
+  if (target?.expires_at) {
+    const h = Math.max(0, (Date.parse(target.expires_at) - Date.now()) / 3.6e6);
+    chip.textContent = h >= 1 ? `fades in ${Math.round(h)} h` : `fades in ${Math.max(1, Math.round(h * 60))} min`;
+  } else chip.hidden = true;
+
+  const onHuntState = (s) => {
+    root.dataset.status = s.status;
+    root.dataset.target = s.target?.id || '';
+    if (target && !s.target && s.position) {
+      // engine doesn't have it yet (> 500 m, or still polling): steer toward the glow centre
+      const d = Math.max(0, haversine(s.position, target) - (target.radius_m || 45) * 0.5);
+      const brg = bearing(s.position, target);
+      const rel = s.heading != null ? (brg - s.heading + 360) % 360 : brg;
+      guide.hidden = false;
+      arrow.style.transform = `rotate(${rel.toFixed(0)}deg)`;
+      gdist.textContent = `~${fmtDist(d)}`;
+      gnote.textContent = s.heading != null ? 'head toward the glow · pings start within 500 m' : 'north is up · pings start within 500 m';
+    } else if (s.target) {
+      guide.hidden = false;
+      arrow.style.transform = s.target.relativeDeg != null ? `rotate(${s.target.relativeDeg.toFixed(0)}deg)` : 'none';
+      gdist.textContent = s.status === 'tuning' ? 'Here' : `${fmtDist(s.target.distanceM)}`;
+      gnote.textContent = s.status === 'tuning' ? 'turn slowly until it clears' : s.target.relativeDeg != null ? 'pings speed up as you close in' : 'walk · pings speed up as you close in';
+    } else guide.hidden = true;
+    if (s.error === 'location-denied') foot.textContent = 'Location is off. Enable it to listen.';
+    try { onState?.(s); } catch { /* host hook */ }
   };
 
-  function stop() {
-    hunt?.stop(); hunt = null;
-    wrap.hidden = true; intro.hidden = false; root.classList.remove('hunting');
+  function close() {
+    if (closed) return; closed = true;
+    hunt?.stop(); hunt = null; root.innerHTML = ''; onClose();
   }
+  $('[data-close]').addEventListener('click', close);
 
-  $('[data-start]').addEventListener('click', () => {
-    if (hunt) return;
-    intro.hidden = true; wrap.hidden = false; root.classList.add('hunting');
-    // startHunt runs its gesture-bound work (AudioContext, iOS compass permission, geolocation) synchronously
-    // inside this tap, before its first await. Do NOT await anything before calling it.
-    startHunt(huntEl, { store, onState }).then((h) => { hunt = h; }, (e) => {
-      console.error('[listen] hunt failed to start', e);
-      stop(); intro.querySelector('.muted').textContent = `Couldn't start listening: ${e.message || e}`;
-    });
+  // synchronous: startHunt does its gesture-bound work before its first await
+  startHunt($('[data-hunt]'), { store, onState: onHuntState, targetId: target?.id || null }).then((h) => {
+    if (closed) h.stop(); else hunt = h;
+  }, (e) => {
+    console.error('[listen] hunt failed to start', e);
+    foot.textContent = `Couldn't start listening: ${e.message || e}`;
   });
-  $('[data-stop]').addEventListener('click', stop);
-
-  return { hide() { stop(); } };
+  return { close, get hunt() { return hunt; } };
 }
