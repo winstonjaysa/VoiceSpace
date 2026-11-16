@@ -16,6 +16,8 @@ const DEVICE_KEY = 'echolocation.device';
 export const MAX_DURATION_S = 60;
 export const MAX_BYTES = 3 * 1024 * 1024;
 export const REPORT_REASONS = ['harassment', 'hate', 'sexual', 'personal_info', 'spam', 'danger', 'other'];
+/** 004_place.sql: what the dropper was in/on (null = unknown). */
+export const PLACE_KINDS = ['building', 'road', 'park', 'other'];
 
 const EXT_BY_MIME = {
   'audio/webm': 'webm', 'audio/mp4': 'mp4', 'audio/x-m4a': 'm4a',
@@ -56,6 +58,7 @@ export const FRIENDLY = {
   TRAIL_FULL: 'This trail is full.',
   INVALID_UNLOCK_AT: 'Pick an unlock time between 1 minute and 1 year from now.',
   INVALID_TAG: 'Tags can use letters, numbers, _ or - (max 32 characters, 8 tags).',
+  INVALID_PLACE: 'That place info is not valid (kind: building/road/park/other, name up to 120 characters, level -10 to 200).',
   INVALID_REASON: 'Pick a reason for the report.',
   TOO_FAR: 'Walk closer to hear this echo.',
   FADED: 'This echo has faded.',
@@ -144,8 +147,13 @@ const iso = (d) => (d == null ? null : new Date(d).toISOString());
 /**
  * dropEcho({ blob, lat, lng, accuracyM|accuracy, headingDeg|heading, altitudeM|altitude, durationS|durationMs, caption,
  *            // v2, all optional:
- *            placeLabel, blurred, parentId, unlockAt (Date|ISO), trailId, transcript, tags: string[] }) -> echo id
- * Without v2-only fields this calls drop_echo exactly like v1 (place_label/blurred are only sent when given).
+ *            placeLabel, blurred, parentId, unlockAt (Date|ISO), trailId, transcript, tags: string[],
+ *            // 004_place.sql, all optional (snake_case place_kind / place_name also accepted):
+ *            placeKind: 'building'|'road'|'park'|'other', placeName: string (<= 120 chars), level: integer -10..200 }) -> echo id
+ * Without v2-only fields this calls drop_echo exactly like v1 (place_label/blurred/place_* are only sent when given).
+ * If the database doesn't have 004 yet, the drop is retried once without place_kind/place_name/level (never lost).
+ * Invalid place values throw EchoError INVALID_PLACE before anything is uploaded.
+ * Privacy: for blurred:true echoes the server never shows placeName/level publicly (only placeKind).
  */
 export async function dropEcho(o = {}) {
   const { blob, lat, lng, caption } = o;
@@ -161,6 +169,7 @@ export async function dropEcho(o = {}) {
   if (!ext) throw new EchoError('INVALID', `unsupported audio type ${blob.type}`);
   const parentId = pick(o.parentId, o.parent_id), unlockAt = pick(o.unlockAt, o.unlock_at), trailId = pick(o.trailId, o.trail_id);
   const placeLabel = pick(o.placeLabel, o.place_label);
+  const place = placeArgs(o);
   const v2 = parentId != null || unlockAt != null || trailId != null || o.transcript != null || (o.tags && o.tags.length);
   const path = `${globalThis.crypto.randomUUID()}.${ext}`;
 
@@ -175,11 +184,42 @@ export async function dropEcho(o = {}) {
   };
   if (placeLabel != null && String(placeLabel).trim()) args.place_label = String(placeLabel).trim().slice(0, 120);
   if (o.blurred != null) args.blurred = !!o.blurred;
-  if (!v2) return rpc('drop_echo', args);
-  return rpc('drop_echo_v2', {
+  const fn = v2 ? 'drop_echo_v2' : 'drop_echo';
+  const full = !v2 ? args : {
     ...args, parent_id: parentId ?? null, unlock_at: iso(unlockAt), trail_id: trailId ?? null,
     transcript: o.transcript?.trim() || null, tags: o.tags?.length ? o.tags : null,
-  });
+  };
+  if (!Object.keys(place).length) return rpc(fn, full);
+  try {
+    return await rpc(fn, { ...full, ...place });
+  } catch (e) {
+    // 004_place.sql not applied yet: PostgREST doesn't know the place_* args -> drop without them
+    if (e?.cause?.code === 'PGRST202') return rpc(fn, full);
+    throw e;
+  }
+}
+/** place_kind / place_name / level args for drop_echo(_v2), validated + cleaned like the server does. */
+function placeArgs(o) {
+  const out = {};
+  const kind = pick(o.placeKind, o.place_kind), name = pick(o.placeName, o.place_name), level = pick(o.level, o.placeLevel, o.place_level);
+  const bad = (msg) => new EchoError('INVALID_PLACE', FRIENDLY.INVALID_PLACE, null, { category: 'INVALID', serverMessage: msg });
+  if (kind != null && String(kind).trim()) {
+    const k = String(kind).trim().toLowerCase();
+    if (!PLACE_KINDS.includes(k)) throw bad(`place_kind must be one of ${PLACE_KINDS.join(', ')}`);
+    out.place_kind = k;
+  }
+  if (name != null) {
+    // eslint-disable-next-line no-control-regex
+    const n = String(name).replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim();
+    if ([...n].length > 120) throw bad('place_name max 120 chars');
+    if (n) out.place_name = n;
+  }
+  if (level != null && level !== '') {
+    const l = Number(level);
+    if (!Number.isInteger(l) || l < -10 || l > 200) throw bad('level must be an integer between -10 and 200');
+    out.level = l;
+  }
+  return out;
 }
 
 /** nearbyEchoes({lat,lng,radiusM}) -> raw rows (v1 columns + heat, listen_count, reply_count, parent_id, unlock_at, tags, place_label, blurred) */
@@ -220,8 +260,12 @@ const toPin = (r) => ({
   blurred: !!r.blurred, heat: r.heat ?? 0, resonanceCount: r.resonance_count ?? 0, listenCount: r.listen_count ?? 0,
   replyCount: r.reply_count ?? 0, createdAt: r.created_at ?? null, expiresAt: r.expires_at ?? null,
   tags: r.tags ?? [], placeLabel: r.place_label ?? null, distanceM: r.distance_m ?? null,
+  // 004 (null before 004 / on rows that don't carry them; placeName + level are always null for blurred echoes)
+  durationS: r.duration_s ?? null, placeKind: r.place_kind ?? null, placeName: r.place_name ?? null, level: r.level ?? null,
 });
-/** Live map: pins in a viewport (max 2°). Exact unless the echo was dropped with blurred:true (then a stable 30–60 m glow). */
+/** Live map: pins in a viewport (max 2°). Exact unless the echo was dropped with blurred:true (then a stable 30–60 m glow).
+ *  Pins: {id, lat, lng, radiusM, blurred, heat, resonanceCount, listenCount, replyCount, createdAt, expiresAt,
+ *         durationS, placeKind, placeName, level} (last 4 need 004_place.sql; null otherwise). */
 export async function mapEchoes({ minLat, minLng, maxLat, maxLng } = {}) {
   return ((await rpc('map_echoes', { min_lat: minLat, min_lng: minLng, max_lat: maxLat, max_lng: maxLng })) || []).map(toPin);
 }
@@ -283,7 +327,8 @@ export async function clearPrivateZone() {
 }
 
 // ---------------------------------------------------------------------------- hunt adapter
-// v1 fields unchanged; v2 rows add heat, placeLabel, parentId, tags, replyCount, listenCount, blurred
+// v1 fields unchanged; v2 rows add heat, placeLabel, parentId, tags, replyCount, listenCount, blurred;
+// 004 adds durationS, placeKind, placeName, level
 // (undefined/defaults on a v1 database). The adapter also offers recordListen().
 const toHunt = (r) => ({
   id: r.id, lat: r.echo_lat, lng: r.echo_lng,
@@ -293,6 +338,7 @@ const toHunt = (r) => ({
   resonanceCount: r.resonance_count,
   heat: r.heat ?? 0, placeLabel: r.place_label ?? null, parentId: r.parent_id ?? null, tags: r.tags ?? [],
   replyCount: r.reply_count ?? 0, listenCount: r.listen_count ?? 0, blurred: !!r.blurred,
+  durationS: r.duration_s ?? null, placeKind: r.place_kind ?? null, placeName: r.place_name ?? null, level: r.level ?? null,
 });
 export function createHuntAdapter({ debug = false } = {}) {
   return {

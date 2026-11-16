@@ -4,3 +4,4 @@ export * from './replies.js';
 export * from './capsule.js';
 export * from './trail-walk.js';
 export { distanceM, bearingDeg, gpsPad } from './geo.js';
+export * from './place-context.js';
