@@ -1,13 +1,28 @@
 # VoiceSpace · Echolocation
 Connect with Voice.
 
-**Echolocation** is a mobile web app (PWA). Record a short audio clip (an *Echo*) and drop it at your exact GPS
-position. There is no map in the app: others discover Echoes by walking. Haptic/sound pings speed up as they get
-closer, then they *tune in* by pointing the phone (compass + spatial audio). Echoes decay after 24 h, and each
-*resonate* from a listener extends their life.
+**Echolocation** is a mobile web app (PWA). Record a short audio clip (an *Echo*) and drop it where you stand.
+**v2:** the home screen is a shared live map. Every Echo shows up for everyone, within about a second, as a soft
+30–60 m glow that contains the real spot but is never centred on it. To *hear* an Echo you still have to walk
+there: pings speed up as you close in, then you *tune in* by pointing the phone (compass + spatial audio).
+Echoes decay after 24 h, and each *resonate* from a listener extends their life (and makes its glow brighter).
 
 Live: https://winstonjaysa.github.io/VoiceSpace/ (GitHub Pages, branch `main`, path `/`).
 No build step: plain HTML/CSS and ES modules. All paths are relative, so it works under `/VoiceSpace/`.
+
+## v2 shared map (stage 1)
+| Path | What |
+|---|---|
+| `js/map.js` | MapLibre GL JS (unpkg CDN) on free, no-key tiles: OpenFreeMap `dark` (CARTO dark-matter fallback). Glows sized in metres, brightness = resonances, fade = time left, clustering, your dot + accuracy ring, sonar ripple (off with reduced motion) |
+| `js/map-feed.js` | Live echo list: polls the viewport every 5 s + Supabase Realtime broadcast topic `echo-map` (`drop` / `update` / `gone`). Broadcasts are hints; polls confirm them |
+| `js/fuzz.js` | Client-side fuzz (fallback until migration 002 runs): deterministic per echo id |
+| `js/echo-store.js` `mapEchoes()` | `map_echoes` RPC (server fuzz) when present, else `debug_echoes` / `nearby_echoes` + client fuzz. Re-checks for the RPC every minute |
+| `js/listen.js` | Hunt overlay. "Walk to it" hunts only the chosen echo (500 m search radius); beyond that it points at the glow |
+| `backend/migrations/002_map_realtime.sql` | Paste once into the Supabase SQL editor: secret-salted server-side fuzz, `map_echoes(min_lat, min_lng, max_lat, max_lng)`, and a trigger that broadcasts fuzzed changes on `echo-map` |
+
+Until the migration runs, the phone that drops (or resonates, or retracts) an echo broadcasts the change itself,
+and the map fuzzes on the phone. Exact coordinates still reach the browser through `debug_echoes` and
+`nearby_echoes` before that. After the migration the map only ever sees salted, server-fuzzed glows.
 
 ## Run locally
 ```sh
@@ -20,13 +35,13 @@ Mic, geolocation and compass need a secure context: `localhost` or HTTPS.
 |---|---|---|
 | `index.html`, `js/app.js`, `css/app.css` | App shell: tab bar (Drop / Listen), hash routing, SW registration | raptor |
 | `js/record.js`, `css/record.css` | **Record-and-drop screen**. Self-contained (markup + logic); mount via `mountRecordScreen(el)` | raptor (trax may replace) |
-| `js/config.js` | Public config: Supabase URL/anon key (empty = local fallback), Mapbox token (from `?mapbox=` once per device, not committed), echo rules | raptor |
+| `js/config.js` | Public config: Supabase URL/anon key (empty = local fallback), echo rules. No map token (v2 tiles need none) | raptor |
 | `js/echo-store.js` | **Data seam (the one store).** Supabase via `echoes-client.js`, IndexedDB fallback, hunt source adapter | raptor |
 | `js/echoes-client.js` | night crawler's Supabase client, copied verbatim from `backend/echoes-client.js` | night crawler |
 | `js/listen.js` | Listen tab: intro + Start listening; hides it and gives the screen to the hunt ring | raptor |
 | `js/hunt.js` | `startHunt(container, { store })`: thin wrapper (UI + source) over the engine | trax (wrapper) |
 | `js/hunt-core.js`, `js/hunt-math.js`, `js/desk-sim.js` | Hunt engine: sonar pings, Kalman GPS, compass tuning, HRTF audio, resonate. Unchanged copies | night crawler |
-| `debug.html`, `js/debug.js` | Hidden Mapbox debug map at `/debug.html`, not linked from the UI | Cooker |
+| `debug.html`, `js/debug.js` | Hidden debug map at `/debug.html` (MapLibre, exact positions + each echo's public glow), not linked from the UI | Cooker |
 | `manifest.json`, `sw.js`, `icons/` | PWA: add to home screen, offline shell | raptor |
 
 ## Record-and-drop screen
@@ -98,6 +113,6 @@ Add `?desk` to the URL for desk mode (keyboard/drag simulation via `js/desk-sim.
 `window.__hunt` / `window.__huntState` are exposed for QA.
 
 ## Debug map
-`/debug.html` (unlisted; open it once as `debug.html?mapbox=<pk. token>` to store the Mapbox token on that device) uses Mapbox GL JS to show every Echo (including expired ones, greyed out) as a dot with an
+`/debug.html` (unlisted, no token needed) uses MapLibre GL JS on OpenFreeMap dark tiles to show every Echo (including expired ones, greyed out) as a dot with an
 accuracy halo. Click a dot for a popup with created/expires/accuracy/audio. The table below the map lists the
 same data. "Show my position" adds your location.

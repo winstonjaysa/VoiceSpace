@@ -10,17 +10,9 @@ export const SUPABASE_URL = 'https://bfpwdtgknbbfetpvopws.supabase.co';
 export const SUPABASE_ANON_KEY = 'sb_publishable_V1pPLlFYTWtFM6gLLIvbyg_vYCq9Vij';
 export const SUPABASE_AUDIO_BUCKET = 'echoes';
 
-// --- Mapbox (hidden debug view only: /debug.html) ----------------------------
-// Public "pk." token, intended for client-side use. Restrict allowed URLs in the Mapbox dashboard.
-// Not committed: GitHub's secret scanning rejects Mapbox tokens in pushes. Supply it once per device:
-//   open debug.html?mapbox=<your pk. token>  -> it is saved in localStorage for later visits.
-export const MAPBOX_TOKEN = (() => {
-  try {
-    const q = new URLSearchParams(location.search).get('mapbox');
-    if (q && q.startsWith('pk.')) localStorage.setItem('echolocation.mapboxToken', q);
-    return localStorage.getItem('echolocation.mapboxToken') || '';
-  } catch { return ''; }
-})();
+// --- Map --------------------------------------------------------------------
+// v2 uses MapLibre GL JS with free, no-key vector tiles (OpenFreeMap dark, CARTO dark-matter fallback; see js/map.js).
+// No map token anywhere in the repo (GitHub secret scanning blocked the old Mapbox token).
 
 // --- Echo rules ---------------------------------------------------------------
 export const ECHO_TTL_MS = 24 * 60 * 60 * 1000;          // an Echo decays 24 h after it is dropped
