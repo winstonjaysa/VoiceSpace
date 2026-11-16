@@ -5,6 +5,7 @@ import * as store from './echo-store.js';
 import { startHunt } from './hunt.js';
 import { markOpened } from './opened.js';
 import { haptic, cherryBurst } from './fx.js';
+import { echoPlace, placeSentence, placeContext, nearestEntrance, cardinal } from './place.js';
 
 const R = 6371008.8, rad = (d) => d * Math.PI / 180;
 function haversine(a, b) {
@@ -40,12 +41,31 @@ export function openHunt(root, { target = null, onClose = () => {}, onState, ini
         <svg class="guide-arrow" data-arrow viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l6 16-6-4-6 4z"/></svg>
         <div><strong data-gdist></strong><span data-gnote></span></div>
       </div>
+      <p class="hunt-place" data-place hidden></p>
       <p class="hunt-foot" data-foot role="status">Headphones help · hold your phone upright, like a lantern</p>
     </div>`;
   const $ = (s) => root.querySelector(s);
   const guide = $('[data-guide]'), arrow = $('[data-arrow]'), gdist = $('[data-gdist]'), gnote = $('[data-gnote]');
   const chip = $('[data-chip]'), foot = $('[data-foot]');
   let hunt = null, closed = false;
+
+  // place context: "It's inside Square One, level 2. Head to the nearest entrance (Door 3, 120 m NE)"
+  const placeEl = $('[data-place]');
+  const tp = target ? echoPlace(target) : null;
+  if (tp?.text) {
+    placeEl.hidden = false; placeEl.dataset.kind = tp.kind; placeEl.textContent = placeSentence(tp) || tp.text;
+    root.dataset.placeKind = tp.kind;
+    if (tp.kind === 'indoor' && tp.name && !(target.blurred || target.radius_m > 0)) {
+      placeContext({ lat: target.lat, lng: target.lng, accuracy: 15 }).then((ctx) => {
+        if (closed || !ctx.entrances?.length) return;
+        const from = window.__huntState?.position || initialFix || target;
+        const e = nearestEntrance(ctx.entrances, from); if (!e) return;
+        const what = e.name ? e.name.replace(/^./, (c) => c.toUpperCase()) : 'Entrance';
+        placeEl.textContent = placeSentence(tp, { entrance: `${what}, ${fmtDist(e.distM)} ${cardinal(e.bearing)}` });
+        root.dataset.entrance = `${e.lat.toFixed(6)},${e.lng.toFixed(6)}`;
+      }).catch(() => {});
+    }
+  }
 
   if (target?.expires_at) {
     const h = Math.max(0, (Date.parse(target.expires_at) - Date.now()) / 3.6e6);

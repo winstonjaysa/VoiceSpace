@@ -17,28 +17,77 @@ const metres = (mult) => ['interpolate', ['exponential', 2], ['zoom'],
 const HEAT_COLOR = ['interpolate', ['linear'], ['get', 'heat'],
   0, '#8fd3e8', 0.45, '#a9a2f0', 1, '#f2d3b0'];   // ice -> lavender -> warm ivory (no primaries)
 
-/** Darken/cool the base style a touch so the glows carry the scene. Silently skips missing layers. */
+/** Night palette: deep navy ground, near-black water, violet minor streets, neon major roads. Skips missing layers. */
 function tintBaseStyle(map) {
   const set = (id, prop, v) => { try { if (map.getLayer(id)) map.setPaintProperty(id, prop, v); } catch { /* style differs */ } };
-  set('background', 'background-color', '#050608');
-  set('water', 'fill-color', '#0a0f15');
-  set('waterway', 'line-color', '#0a0f15');
-  set('building', 'fill-color', '#0b0c10');
-  set('building', 'fill-outline-color', '#14161d');
-  set('landuse_park', 'fill-color', '#0b0f0e');
-  set('landcover_wood', 'fill-color', '#0b0f0e');
-  set('highway_minor', 'line-color', '#15171d');
-  set('highway_major_inner', 'line-color', '#191c24');
-  set('highway_major_casing', 'line-color', 'rgba(70,78,96,0.55)');
-  set('highway_motorway_casing', 'line-color', 'rgba(80,88,108,0.6)');
-  set('highway_path', 'line-color', '#14161c');
-  set('highway_path', 'line-opacity', 0.55);
-  for (const id of ['place_other', 'place_suburb', 'place_village', 'place_town', 'place_city', 'place_city_large', 'highway_name_other']) {
-    set(id, 'text-color', 'rgba(150,158,176,0.75)');
+  set('background', 'background-color', '#05060d');
+  set('water', 'fill-color', '#040912');
+  set('waterway', 'line-color', '#06101c');
+  set('building', 'fill-color', '#0d1022');
+  set('building', 'fill-outline-color', '#1b2040');
+  set('landuse_residential', 'fill-color', '#070912');
+  set('landuse_park', 'fill-color', '#06110f');
+  set('landcover_wood', 'fill-color', '#06110f');
+  set('highway_minor', 'line-color', '#1a1838');
+  set('highway_path', 'line-color', '#1d1a3a');
+  set('highway_path', 'line-opacity', 0.6);
+  set('highway_major_inner', 'line-color', '#122a3a');
+  set('highway_major_casing', 'line-color', 'rgba(0,229,255,0.28)');
+  set('highway_major_subtle', 'line-color', 'rgba(0,229,255,0.25)');
+  set('highway_motorway_inner', 'line-color', '#2a1238');
+  set('highway_motorway_casing', 'line-color', 'rgba(255,59,141,0.35)');
+  set('highway_motorway_subtle', 'line-color', 'rgba(255,59,141,0.3)');
+  for (const id of ['railway', 'railway_transit', 'railway_minor']) set(id, 'line-color', 'rgba(169,162,240,0.35)');
+  for (const id of ['place_other', 'place_suburb', 'place_village', 'place_town', 'place_city', 'place_city_large']) {
+    set(id, 'text-color', 'rgba(170,180,215,0.8)'); set(id, 'text-halo-color', 'rgba(5,6,13,0.9)');
+  }
+  set('highway_name_other', 'text-color', 'rgba(120,230,255,0.75)'); set('highway_name_other', 'text-halo-color', 'rgba(5,6,13,0.9)');
+}
+/** Neon glow under major roads + 3D buildings (fill-extrusion from the style's own vector source, no token). */
+function addCityLayers(map) {
+  const st = map.getStyle(); const layers = st.layers || [];
+  const firstSymbol = layers.find((l) => l.type === 'symbol')?.id;
+  const bLayer = layers.find((l) => l['source-layer'] === 'building');
+  const tLayer = layers.find((l) => l['source-layer'] === 'transportation');
+  if (tLayer && !map.getLayer('neon-glow')) {
+    const src = tLayer.source;
+    const major = ['match', ['get', 'class'], ['motorway', 'trunk', 'primary', 'secondary'], true, false];
+    const col = ['match', ['get', 'class'], ['motorway', 'trunk'], '#ff3b8d', '#00e5ff'];
+    map.addLayer({ id: 'neon-glow', type: 'line', source: src, 'source-layer': 'transportation', minzoom: 10, filter: major,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': col, 'line-blur': ['interpolate', ['linear'], ['zoom'], 12, 3, 18, 10],
+        'line-width': ['interpolate', ['exponential', 1.6], ['zoom'], 10, 2, 14, 7, 18, 26], 'line-opacity': 0.3 } }, firstSymbol);
+    map.addLayer({ id: 'neon-core', type: 'line', source: src, 'source-layer': 'transportation', minzoom: 10, filter: major,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': col, 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.6, 18, 2], 'line-opacity': 0.9 } }, firstSymbol);
+    map.addLayer({ id: 'neon-minor', type: 'line', source: src, 'source-layer': 'transportation', minzoom: 14,
+      filter: ['match', ['get', 'class'], ['tertiary', 'minor', 'service'], true, false],
+      paint: { 'line-color': '#7a5cff', 'line-width': ['interpolate', ['linear'], ['zoom'], 14, 0.5, 18, 1.8], 'line-opacity': 0.6 } }, firstSymbol);
+  }
+  if (bLayer && !map.getLayer('building-3d')) {
+    try { map.setLayerZoomRange(bLayer.id, bLayer.minzoom || 12, 14.6); } catch { /* ignore */ }
+    const h = ['coalesce', ['get', 'render_height'], 8], b = ['coalesce', ['get', 'render_min_height'], 0];
+    map.addLayer({ id: 'building-3d', type: 'fill-extrusion', source: bLayer.source, 'source-layer': 'building', minzoom: 14,
+      paint: {
+        'fill-extrusion-color': ['interpolate', ['linear'], h, 0, '#0c0f22', 25, '#131735', 80, '#1b1d48', 200, '#26215a'],
+        'fill-extrusion-height': ['interpolate', ['linear'], ['zoom'], 14, 0, 15.2, h],
+        'fill-extrusion-base': ['interpolate', ['linear'], ['zoom'], 14, 0, 15.2, b],
+        'fill-extrusion-opacity': 0.82, 'fill-extrusion-vertical-gradient': true } }, firstSymbol);
+  }
+  // highlighted buildings: echoes inside them (neon lift + ground glow)
+  if (!map.getSource('bhl')) map.addSource('bhl', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getLayer('bhl-ground')) {
+    map.addLayer({ id: 'bhl-ground', type: 'line', source: 'bhl', paint: { 'line-color': ['get', 'col'], 'line-width': 3, 'line-blur': 3, 'line-opacity': 0.8 } }, firstSymbol);
+    map.addLayer({ id: 'bhl-3d', type: 'fill-extrusion', source: 'bhl', minzoom: 13, paint: {
+      'fill-extrusion-color': ['get', 'col'], 'fill-extrusion-height': ['+', ['get', 'h'], 0.6], 'fill-extrusion-base': ['get', 'b'],
+      'fill-extrusion-opacity': 0.55, 'fill-extrusion-vertical-gradient': true } }, firstSymbol);
   }
 }
-
 import { isOpened } from './opened.js';
+import { echoPlace } from './place.js';
+const PITCH = 55;                                 // follow / intro camera
+const placeKind = (e) => echoPlace(e)?.kind || null;
+const pixelRatio = () => Math.min(window.devicePixelRatio || 1, 2);   // cap: DPR3 phones render at 2x (60 fps)
 
 export function createMapView(container, { center, zoom = 15.3, onSelect = () => {}, onMove = () => {}, onReady = () => {}, onError = () => {},
   onUserPan = () => {} } = {}) {
@@ -47,7 +96,8 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
   let styleIx = 0, ready = false, echoes = [], me = null, raf = 0, styleTimer = null;
   const map = new ml.Map({
     container, style: STYLES[0].url, center: center ? [center.lng, center.lat] : [-79.3832, 43.6532], zoom,
-    attributionControl: false, pitchWithRotate: false, dragRotate: false, maxPitch: 0, fadeDuration: 150,
+    attributionControl: false, pitchWithRotate: false, dragRotate: false, maxPitch: 70, fadeDuration: 150,
+    pixelRatio: pixelRatio(), antialias: false,
   });
   map.touchZoomRotate.disableRotation();
   // Base styles reference sprite images (e.g. 'wood-pattern') that aren't always in the sprite: give MapLibre a
@@ -77,12 +127,13 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     const now = Date.now();
     return { type: 'FeatureCollection', features: list.map((e) => {
       const left = Math.max(0, Date.parse(e.expires_at) - now);
-      const heat = 1 - Math.exp(-(e.resonance_count || 0) / 3);
+      const heat = Math.max(1 - Math.exp(-((e.resonance_count || 0) + 0.3 * (e.listen_count || 0)) / 3), Math.min(1, Number(e.heat) || 0));
       return { type: 'Feature', id: hashId(e.id), geometry: { type: 'Point', coordinates: [e.lng, e.lat] }, properties: {
         id: e.id, rpx0: (e.radius_m || 45) / (M_PER_PX_Z0 * Math.cos(e.lat * Math.PI / 180)),
         heat, life: Math.max(0.12, Math.min(1, left / DAY)), fresh: e.freshUntil > now ? 1 : 0, mine: e.mine ? 1 : 0,
         blurred: e.blurred || e.radius_m > 0 ? 1 : 0, pending: e.queued ? 1 : 0,
         cherry: !e.mine && !e.queued && !isOpened(e.id) ? 1 : 0,          // unopened on this device
+        indoor: placeKind(e) === 'indoor' ? 1 : 0, place: echoPlace(e)?.text || '',
       } };
     }) };
   }
@@ -133,6 +184,11 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
       'circle-radius': metres(2.4), 'circle-color': '#e9f6ff', 'circle-blur': 1, 'circle-opacity': 0.35 } });
     // exact pins: soft halo, sonar ripple, bright core (queued/pending ones are dim and warm)
     const pinR = (a, b) => ['interpolate', ['linear'], ['zoom'], 11, a, 18, b];
+    // heat-scaled bloom: hotter echoes glow wider and brighter
+    map.addLayer({ id: 'pin-bloom', type: 'circle', source: 'echoes', filter: ['all', single, ['==', ['get', 'blurred'], 0]], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, ['+', 10, ['*', 18, ['get', 'heat']]], 18, ['+', 26, ['*', 46, ['get', 'heat']]]],
+      'circle-color': ['case', ['==', ['get', 'cherry'], 1], '#ff3b5c', HEAT_COLOR], 'circle-blur': 1,
+      'circle-opacity': ['*', ['get', 'life'], ['+', 0.14, ['*', 0.32, ['get', 'heat']]]] } });
     map.addLayer({ id: 'pin-halo', type: 'circle', source: 'echoes', filter: exact, paint: {
       'circle-radius': pinR(9, 20), 'circle-color': HEAT_COLOR, 'circle-blur': 1,
       'circle-opacity': ['*', ['get', 'life'], ['case', ['==', ['get', 'pending'], 1], 0.25, ['+', 0.45, ['*', 0.3, ['get', 'heat']]]]] } });
@@ -156,14 +212,22 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
       'icon-image': 'cherry', 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-anchor': 'bottom', 'icon-offset': [0, 6],
       'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.55, 18, 1] },
       paint: { 'icon-opacity': ['max', 0.55, ['get', 'life']] } });
+    // place label under single pins when zoomed in ("Inside Square One · L2"; blurred: kind only)
+    map.addLayer({ id: 'pin-place', type: 'symbol', source: 'echoes', minzoom: 16.2, filter: ['all', single, ['!=', ['get', 'place'], '']], layout: {
+      'text-field': ['get', 'place'], 'text-font': font, 'text-size': 11, 'text-offset': [0, 1.5], 'text-anchor': 'top', 'text-max-width': 12,
+      'text-optional': true }, paint: { 'text-color': ['case', ['==', ['get', 'indoor'], 1], '#9ff0ff', 'rgba(220,228,245,0.85)'],
+      'text-halo-color': 'rgba(5,6,13,0.92)', 'text-halo-width': 1.4 } });
     // you
     map.addLayer({ id: 'me-cone', type: 'symbol', source: 'me', filter: ['has', 'heading'], layout: {
       'icon-image': 'me-cone', 'icon-rotate': ['get', 'heading'], 'icon-rotation-alignment': 'map',
       'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-size': ['interpolate', ['linear'], ['zoom'], 12, 0.7, 18, 1.1] },
       paint: { 'icon-opacity': 0.9 } });
-    map.addLayer({ id: 'me-acc', type: 'circle', source: 'me', paint: {
-      'circle-radius': metres(1), 'circle-color': 'rgba(210,225,255,0.07)', 'circle-stroke-width': 1, 'circle-stroke-color': 'rgba(210,225,255,0.22)' } });
-    map.addLayer({ id: 'me-glow', type: 'circle', source: 'me', paint: { 'circle-radius': 16, 'circle-color': '#dfe9ff', 'circle-blur': 1, 'circle-opacity': 0.35 } });
+    map.addLayer({ id: 'me-pulse', type: 'circle', source: 'me', paint: {
+      'circle-radius': 10, 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-width': 1.5, 'circle-stroke-color': '#8fe9ff', 'circle-stroke-opacity': 0,
+      'circle-pitch-alignment': 'map' } });
+    map.addLayer({ id: 'me-acc', type: 'circle', source: 'me', paint: { 'circle-pitch-alignment': 'map',
+      'circle-radius': metres(1), 'circle-color': 'rgba(143,233,255,0.08)', 'circle-stroke-width': 1, 'circle-stroke-color': 'rgba(143,233,255,0.35)' } });
+    map.addLayer({ id: 'me-glow', type: 'circle', source: 'me', paint: { 'circle-radius': 16, 'circle-color': '#8fe9ff', 'circle-blur': 1, 'circle-opacity': 0.4 } });
     map.addLayer({ id: 'me-dot', type: 'circle', source: 'me', paint: {
       'circle-radius': 5.5, 'circle-color': '#f5f8ff', 'circle-stroke-width': 2.5, 'circle-stroke-color': '#0a0c10' } });
   }
@@ -171,6 +235,7 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
   map.on('style.load', () => {
     clearTimeout(styleTimer);
     tintBaseStyle(map);
+    try { addCityLayers(map); } catch (e) { console.info('[map] city layers', e?.message || e); }
     if (!map.getSource('echoes')) addLayers();
     if (!ready) { ready = true; container.dataset.mapReady = '1'; container.dataset.mapStyle = STYLES[styleIx].name; onReady(api); emitMove(); }
     animate();
@@ -213,7 +278,7 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     let last = 0;
     const tick = (t) => {
       raf = requestAnimationFrame(tick);
-      if (t - last < 50 || document.hidden || !map.getLayer('echo-ripple')) return;
+      if (t - last < 40 || document.hidden || !map.getLayer('echo-ripple')) return;
       last = t;
       const k = (t % 3200) / 3200;                     // 0..1
       const ease = 1 - (1 - k) ** 3;
@@ -231,16 +296,69 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
         map.setPaintProperty('cherry-ring', 'circle-stroke-opacity', ['*', ['get', 'life'], 0.8 * (1 - k2)]);
         map.setPaintProperty('cherry-icon', 'icon-translate', [0, -2.5 * pulse]);
       }
+      // you: breathing glow + an expanding ring every 2.4 s; accuracy halo breathes with it
+      const k3 = (t % 2400) / 2400, e3 = 1 - (1 - k3) ** 2, br = 0.5 + 0.5 * Math.sin(t / 600);
+      map.setPaintProperty('me-glow', 'circle-radius', 14 + 8 * br);
+      map.setPaintProperty('me-glow', 'circle-opacity', 0.28 + 0.22 * br);
+      map.setPaintProperty('me-pulse', 'circle-radius', 8 + 30 * e3);
+      map.setPaintProperty('me-pulse', 'circle-stroke-opacity', 0.7 * (1 - k3));
+      map.setPaintProperty('me-acc', 'circle-stroke-opacity', 0.25 + 0.25 * br);
+      if (map.getLayer('bhl-3d')) map.setPaintProperty('bhl-3d', 'fill-extrusion-opacity', 0.38 + 0.25 * br);
+      if (map.getLayer('neon-glow')) map.setPaintProperty('neon-glow', 'line-opacity', 0.26 + 0.08 * Math.sin(t / 1400));
     };
     raf = requestAnimationFrame(tick);
   }
 
+  // buildings with an (exact, not blurred) echo inside them glow: footprint from the vector tiles at the echo's point
+  let selectedId = null, hlT = 0;
+  const pip = (pt, ring) => { let c = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < ((xj - xi) * (pt[1] - yi)) / (yj - yi) + xi) c = !c; } return c; };
+  function updateHighlights() {
+    if (!ready || !map.getSource('bhl')) return;
+    const src = map.getSource('bhl');
+    const bl = (map.getStyle().layers || []).find((l) => l['source-layer'] === 'building');
+    if (!bl || map.getZoom() < 13.5) { src.setData(empty()); container.dataset.highlights = '0'; return; }
+    const b = map.getBounds();
+    const targets = echoes.filter((e) => !(e.blurred || e.radius_m > 0) && (placeKind(e) === 'indoor' || e.id === selectedId) && b.contains([e.lng, e.lat])).slice(0, 24);
+    if (!targets.length) { src.setData(empty()); container.dataset.highlights = '0'; return; }
+    let feats = []; try { feats = map.querySourceFeatures(bl.source, { sourceLayer: 'building' }); } catch { /* ignore */ }
+    const out = [];
+    for (const e of targets) {
+      const pt = [e.lng, e.lat]; let best = null;
+      for (const f of feats) {
+        const g = f.geometry; const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+        for (const rings of polys) if (pip(pt, rings[0])) { const n = rings[0].length; if (!best || n < best.n) best = { n, rings, p: f.properties }; }
+      }
+      if (!best) continue;
+      const cherry = !e.mine && !e.queued && !isOpened(e.id);
+      out.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: best.rings }, properties: {
+        id: e.id, h: Number(best.p.render_height) || 8, b: Number(best.p.render_min_height) || 0,
+        col: e.id === selectedId ? '#ffd36b' : cherry ? '#ff3b8d' : '#00e5ff' } });
+    }
+    src.setData({ type: 'FeatureCollection', features: out });
+    container.dataset.highlights = String(out.length);
+  }
+  const scheduleHl = () => { clearTimeout(hlT); hlT = setTimeout(updateHighlights, 180); };
+  map.on('moveend', scheduleHl);
+  map.on('sourcedata', (e) => { if (e.tile && e.sourceId !== 'echoes' && e.sourceId !== 'me' && e.sourceId !== 'bhl') scheduleHl(); });
+
   const api = {
     map,
+    updateHighlights,
+    /** Highlight the building an echo is in (card open), or clear with null. */
+    select(id) { selectedId = id || null; scheduleHl(); },
+    /** First fix: a smooth fly-in from above to a tilted, slightly rotated street view. */
+    intro({ lat, lng }) {
+      const to = { center: [lng, lat], zoom: Math.max(16.4, Math.min(17, map.getZoom() + 1)), pitch: PITCH, bearing: -17 };
+      if (reducedMotion()) { map.jumpTo(to); return; }
+      map.jumpTo({ center: [lng, lat], zoom: Math.min(map.getZoom(), 12.2), pitch: 0, bearing: 0 });
+      map.flyTo({ ...to, duration: 2800, curve: 1.45, essential: true });
+    },
     get ready() { return ready; },
     setEchoes(list) {
       echoes = list;
       if (ready && map.getSource('echoes')) map.getSource('echoes').setData(toFeatures(list));
+      scheduleHl();
     },
     setMe(pos) {
       me = pos;
@@ -249,8 +367,15 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     flyTo({ lat, lng }, z) {
       map.flyTo({ center: [lng, lat], zoom: z ?? Math.max(map.getZoom(), 15.5), duration: reducedMotion() ? 0 : 1100, essential: true });
     },
-    follow({ lat, lng }) {
-      map.easeTo({ center: [lng, lat], duration: reducedMotion() ? 0 : 600, essential: true });
+    /** Follow: keep the tilt; with a compass/course heading, ease the bearing gently toward it (max 12° per step). */
+    follow({ lat, lng, heading }) {
+      const o = { center: [lng, lat], duration: reducedMotion() ? 0 : 900, essential: true };
+      if (map.getPitch() < 30) o.pitch = PITCH;
+      if (!reducedMotion() && Number.isFinite(heading)) {
+        const cur = map.getBearing(), d = ((heading - cur + 540) % 360) - 180;
+        if (Math.abs(d) > 6) o.bearing = cur + Math.max(-12, Math.min(12, d * 0.4));
+      }
+      map.easeTo(o);
     },
     jumpTo({ lat, lng }, z) { map.jumpTo({ center: [lng, lat], zoom: z ?? map.getZoom() }); },
     project({ lat, lng }) { return map.project([lng, lat]); },

@@ -34,6 +34,8 @@ export function createMapFeed({ onChange = () => {}, onStatus = () => {}, onErro
   function upsert(rec, via) {
     const prev = echoes.get(rec.id);
     const now = Date.now();
+    // rows that don't carry place/duration (v1 / pre-004 polls) must not wipe what realtime or our own drop told us
+    if (prev) for (const k of ['place_label', 'place_kind', 'place_name', 'level', 'duration_ms']) if (rec[k] == null && prev[k] != null) rec = { ...rec, [k]: prev[k] };
     echoes.set(rec.id, {
       ...prev, ...rec, mine: rec.mine ?? store.isMine(rec.id), via: prev?.via === 'poll' ? 'poll' : via,
       seenAt: now, firstSeenAt: prev?.firstSeenAt ?? now,
@@ -99,6 +101,12 @@ export function createMapFeed({ onChange = () => {}, onStatus = () => {}, onErro
         resonance_count: Math.max(0, payload.resonance_count | 0), created_at: payload.created_at || null,
         expires_at: new Date(payload.expires_at).toISOString(), heat: finite(payload.heat) ? payload.heat : null,
         fuzz: blurred ? (payload.fuzz === 'server' ? 'server' : 'client') : 'none', source: 'supabase',
+        // 004_place.sql payload: duration + place (the server never sends a blurred echo's name or level)
+        ...(finite(payload.duration_s) ? { duration_ms: Math.round(payload.duration_s * 1000) } : {}),
+        ...(payload.place_kind ? { place_kind: String(payload.place_kind) } : {}),
+        ...(!blurred && payload.place_name ? { place_name: String(payload.place_name).slice(0, 120) } : {}),
+        ...(!blurred && Number.isInteger(payload.level) ? { level: payload.level } : {}),
+        ...(payload.place_label ? { place_label: String(payload.place_label).slice(0, 120) } : {}),
       };
       upsert(rec, via); emit();
       window.dispatchEvent(new CustomEvent('echo-map:realtime', { detail: { event, id: rec.id, at: Date.now() } }));
@@ -120,7 +128,9 @@ export function createMapFeed({ onChange = () => {}, onStatus = () => {}, onErro
     const f = e.blurred ? fuzzPoint(e.id, e.lat, e.lng) : { lat: e.lat, lng: e.lng, radiusM: 0 };
     const rec = { id: e.id, lat: f.lat, lng: f.lng, radius_m: f.radiusM, blurred: Boolean(e.blurred),
       resonance_count: e.resonance_count ?? 0, created_at: e.created_at, expires_at: e.expires_at,
-      fuzz: e.blurred ? 'client' : 'self', source: e.source, mine: true, queued: Boolean(e.queued) };
+      fuzz: e.blurred ? 'client' : 'self', source: e.source, mine: true, queued: Boolean(e.queued),
+      place_label: e.place_label || null, place_kind: e.place_kind || null,
+      place_name: e.blurred ? null : e.place_name || null, level: e.blurred ? null : e.level ?? null, duration_ms: e.duration_ms ?? null };
     upsert(rec, 'self'); emit();
     if (e.source === 'supabase') {
       if (store.mapMode === 'map_echoes') setTimeout(poll, 600);  // pick up the server-fuzzed glow

@@ -64,6 +64,9 @@ export function normalizeDropInput(input = {}) {
     caption: pick(input.caption) ?? null,
     blurred: Boolean(pick(input.blurred, input.blur)),
     placeLabel: pick(input.placeLabel, input.place_label) ?? null,
+    placeKind: pick(input.placeKind, input.place_kind) ?? null,          // 004_place.sql
+    placeName: pick(input.placeName, input.place_name) ?? null,
+    level: Number.isInteger(input.level) ? input.level : null,
     // migration-v2 extras (trax's modules): sent only once v2 is installed, see supabaseBackend.dropEcho
     transcript: pick(input.transcript) ?? null,
     tags: Array.isArray(input.tags) && input.tags.length ? input.tags.slice(0, 8) : null,
@@ -128,7 +131,7 @@ const audioUrlCache = new Map(); // id -> objectURL
 const localBackend = {
   name: 'local-indexeddb',
 
-  async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude, caption, blurred }) {
+  async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude, caption, blurred, placeLabel, placeKind, placeName, level }) {
     validateDrop({ blob, lat, lng });
     const db = await openDb();
     const id = newId();
@@ -147,6 +150,8 @@ const localBackend = {
       mime_type: mimeType || blob.type || 'application/octet-stream',
       caption: caption || null,
       blurred: Boolean(blurred),
+      place_label: placeLabel || null, place_kind: placeKind || null,
+      place_name: blurred ? null : placeName || null, level: blurred ? null : level ?? null,
     };
     // Store the Blob directly (IndexedDB supports Blobs, incl. iOS Safari 14+).
     const buf = await blob.arrayBuffer(); // ArrayBuffer is the most portable IDB value
@@ -288,7 +293,7 @@ const supabaseBackend = {
   name: 'supabase',
 
   async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude, caption, blurred, placeLabel,
-    transcript, tags, parentId, unlockAt, trailId }) {
+    placeKind, placeName, level, transcript, tags, parentId, unlockAt, trailId }) {
     validateDrop({ blob, lat, lng });
     // echoes-client derives the type from blob.type; make sure it carries the recorder's mimeType.
     const typed = blob.type ? blob : new Blob([blob], { type: mimeType || 'audio/webm' });
@@ -302,6 +307,8 @@ const supabaseBackend = {
     const args = { blob: typed, lat, lng, accuracyM, heading, altitude, durationS };
     if (v2) {
       Object.assign(args, { caption, placeLabel: placeLabel || null, blurred: Boolean(blurred) });
+      // 004_place.sql: kind/name/level columns (echoes-client-v2 retries without them while 004 isn't there yet)
+      if (placeKind) Object.assign(args, { placeKind, ...(blurred ? {} : { placeName: placeName || null, level: Number.isInteger(level) ? level : null }) });
       // transcript/tags/reply/capsule/trail go through drop_echo_v2; a drop never fails just for lack of a transcript
       if (transcript) args.transcript = transcript;
       if (tags?.length) args.tags = tags;
@@ -309,7 +316,7 @@ const supabaseBackend = {
       if (unlockAt) args.unlockAt = unlockAt;
       if (trailId) args.trailId = trailId;
     }
-    else args.caption = blurred ? withBlurMarker(caption) : caption;
+    else args.caption = withPlaceMarker(blurred ? withBlurMarker(caption) : caption, placeLabel);
     const id = await sb(() => sbClient.dropEcho(args));
     const blurVia = blurred ? (v2 ? 'column' : 'caption') : null;
     const now = Date.now();
@@ -319,6 +326,7 @@ const supabaseBackend = {
       resonance_count: 0, audio_path: null, duration_ms: Math.round(durationMs || 0),
       mime_type: (typed.type || '').split(';')[0], source: 'supabase',
       blurred: Boolean(blurred), blur_via: blurVia, place_label: placeLabel || null,
+      place_kind: placeKind || null, place_name: blurred ? null : placeName || null, level: blurred ? null : level ?? null,
       parent_id: v2 ? parentId || null : null, unlock_at: v2 ? unlockAt || null : null, trail_id: v2 ? trailId || null : null,
       tags: v2 ? tags || null : null, transcript: v2 ? transcript || null : null,
     };
@@ -485,6 +493,7 @@ function queuedEcho(rec) {
     altitude: numOrNull(i.altitude), created_at: rec.queued_at, expires_at: new Date(t + ECHO_TTL_MS).toISOString(),
     resonance_count: 0, audio_path: null, duration_ms: Math.round(i.durationMs || 0), mime_type: rec.mime_type,
     blurred: Boolean(i.blurred), place_label: i.placeLabel ?? null, caption: i.caption ?? null,
+    place_kind: i.placeKind ?? null, place_name: i.blurred ? null : i.placeName ?? null, level: i.blurred ? null : i.level ?? null,
     source: 'queued', queued: true, last_error: rec.last_error,
   };
 }
@@ -723,12 +732,28 @@ export async function v2Client() {
 
 /** "Blur my spot" before migration-v2: drop_echo has no blurred column yet, so the choice rides in the caption. */
 export const BLUR_MARKER = '[[blur]]';
+// Place before migration-v2 (no place_label column): rides in the caption too, as [[@Inside Square One · L2]].
+const PLACE_RE = /\s*\[\[@([^\]]{1,80})\]\]/;
 export const withBlurMarker = (c) => {
   const t = String(c || '').replace(BLUR_MARKER, '').trim();
   return t ? `${t.slice(0, 120)} ${BLUR_MARKER}` : BLUR_MARKER;
 };
+export function withPlaceMarker(c, label) {
+  if (!label) return c;
+  const m = ` [[@${String(label).replace(/[\[\]]/g, '').slice(0, 80)}]]`;
+  const t = String(c || '').replace(PLACE_RE, '');
+  return (t.slice(0, 140 - m.length) + m).trim();
+}
+export const placeFromCaption = (c) => (typeof c === 'string' ? c.match(PLACE_RE)?.[1] ?? null : null);
 export const hasBlurMarker = (c) => typeof c === 'string' && c.includes(BLUR_MARKER);
-export const stripBlurMarker = (c) => (typeof c === 'string' ? c.replace(BLUR_MARKER, '').trim() || null : c);
+export const stripBlurMarker = (c) => (typeof c === 'string' ? c.replace(BLUR_MARKER, '').replace(PLACE_RE, '').trim() || null : c);
+/** 004 place fields (+ the packed label) from any row shape. Blurred rows never carry a name or level. */
+function placeFields(r, blurred) {
+  const kind = r.placeKind ?? r.place_kind ?? null;
+  return { place_kind: kind, place_name: blurred ? null : r.placeName ?? r.place_name ?? null,
+    level: blurred ? null : r.level ?? null, place_label: r.placeLabel ?? r.place_label ?? placeFromCaption(r.caption) ?? null };
+}
+export { placeFields };
 
 const inBox = (b, lat, lng) => lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng;
 /**
@@ -746,7 +771,7 @@ function mapRecord(r, fuzz = 'client') {
       resonance_count: r.resonanceCount ?? r.resonance_count ?? 0, heat: r.heat ?? null,
       created_at: r.createdAt ?? r.created_at ? new Date(r.createdAt ?? r.created_at).toISOString() : null,
       expires_at: r.expiresAt ?? r.expires_at ? new Date(r.expiresAt ?? r.expires_at).toISOString() : null,
-      place_label: r.placeLabel ?? r.place_label ?? null, fuzz: 'server', mine: isMine(r.id),
+      ...placeFields(r, Boolean(r.blurred) || radius > 0), fuzz: 'server', mine: isMine(r.id),
       reply_count: r.replyCount ?? r.reply_count ?? 0, listen_count: r.listenCount ?? r.listen_count ?? 0, tags: r.tags ?? [],
       duration_ms: r.duration_ms ?? (r.duration_s ?? r.durationS) != null ? (r.duration_ms ?? Math.round((r.duration_s ?? r.durationS) * 1000)) : null,
     };
@@ -760,7 +785,7 @@ function mapRecord(r, fuzz = 'client') {
     resonance_count: r.resonance_count ?? 0, heat: r.heat ?? null,
     created_at: r.created_at ? new Date(r.created_at).toISOString() : null,
     expires_at: r.expires_at ? new Date(r.expires_at).toISOString() : null,
-    place_label: r.place_label ?? null, fuzz: blurred ? 'client' : 'none', mine: isMine(r.id),
+    ...placeFields(r, blurred), fuzz: blurred ? 'client' : 'none', mine: isMine(r.id),
     duration_ms: r.duration_ms ?? (r.duration_s ?? r.durationS) != null ? (r.duration_ms ?? Math.round((r.duration_s ?? r.durationS) * 1000)) : null,
   };
 }
