@@ -432,6 +432,16 @@ export function mapboxToken({ store = null } = {}) {
   tokenP.then((t) => { if (!t) setTimeout(() => { tokenP = null; }, 60000); });
   return tokenP;
 }
+/** Any resolved ctx (Mapbox or OSM/tiles) -> trax's ctx shape, so drops map through trax's toDropPlace (004 fields). */
+export function toTraxCtx(ctx) {
+  if (!ctx || ctx.kind === 'unknown') return null;
+  if (ctx.mapbox && ctx.source === 'mapbox' && !ctx.snapped) return ctx.mapbox;
+  const named = ctx.name && !/^(a|an) /.test(ctx.name) ? ctx.name : null;
+  const setting = ctx.kind === 'indoor' ? 'indoors' : ctx.kind === 'road' ? 'street' : 'outdoors';
+  return { setting, label: ctx.kind === 'park' ? 'park' : ctx.label || '', venue: ctx.kind === 'indoor' ? named : null,
+    road: ctx.kind === 'road' && named ? { name: named } : ctx.road || null, nearby: ctx.kind === 'outdoor' && named ? [{ name: named }] : [],
+    floorHint: ctx.floorHint || null };
+}
 const BLDG_WORD = (t) => (!t || /^building/.test(t) ? 'a building' : TYPE_WORD[t] || `a ${t.replace(/_/g, ' ')} building`);
 /** trax/Mapbox ctx -> the same shape as the OSM classify() result (+ trax's own ctx under .mapbox). */
 export function fromMapbox(c, fix) {

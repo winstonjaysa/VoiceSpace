@@ -6,14 +6,14 @@
 //       -> preview / re-record -> "Drop here" -> confirmation (lat/lng/accuracy/expiry).
 
 import * as store from './echo-store.js';
-import { createLiveTranscript, capsulePresets, opensIn, canReplyHere, replyTo as replyToEcho, dropOnTrail } from './v2/index.js';
+import { createLiveTranscript, capsulePresets, opensIn, canReplyHere, replyTo as replyToEcho, dropOnTrail, toDropPlace } from './v2/index.js';
 const { dropEcho } = store;
 import { MAX_RECORD_MS, GPS_GOOD_ACCURACY_M } from './config.js';
 import { preciseFix, placeLabel, distM } from './precise-fix.js';
 import { STYLES } from './map.js';
 import { haptic, spring } from './fx.js';
 import { setDuration } from './opened.js';
-import { resolvePlace, placeLabel as placeText, KIND_TO_DB, levelToInt, levelShort, ROAD_WARN } from './place.js';
+import { resolvePlace, placeLabel as placeText, toTraxCtx, levelToInt, levelShort, ROAD_WARN } from './place.js';
 
 const LOCK_WINDOW_MS = 15000;     // wait up to 15 s for a good fix
 const LOCK_TARGET_M = 15;         // ... at or under 15 m
@@ -672,13 +672,12 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     const blurred = el.blur.checked;
     const ctxLabel = pinCtx ? placeText(pinCtx, floorSel, { blurred }) : null;
     const place = ctxLabel || (blurred ? null : await Promise.race([labelP || Promise.resolve(null), new Promise((r) => setTimeout(() => r(null), 1500))]));
-    const generic = !pinCtx?.name || /^(a|an) /.test(pinCtx.name);
+    // 004 fields come from trax's toDropPlace (blurred -> kind only); the floor picker, when used, overrides the level
+    const dropPlace = toDropPlace(toTraxCtx(pinCtx), { blurred });
+    if (!blurred && pinCtx?.kind === 'indoor' && floorSel != null && levelToInt(floorSel) != null) dropPlace.level = levelToInt(floorSel);
     try {
       const args = {
-        blurred, placeLabel: place || null,
-        placeKind: pinCtx ? KIND_TO_DB[pinCtx.kind] || null : null,
-        placeName: pinCtx && !generic && !blurred ? pinCtx.name.slice(0, 120) : null,
-        level: pinCtx?.kind === 'indoor' && !blurred ? levelToInt(floorSel) : null,
+        blurred, placeLabel: place || null, ...dropPlace,
         transcript: s.transcript || null, tags: s.tags?.length ? s.tags : null,
         unlockAt: !replyTo && v2() ? s.unlockAt || null : null, accuracy: fix.accuracy,
         blob: s.blob, mimeType: s.blob.type, durationMs: Math.round(s.durationMs),
