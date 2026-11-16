@@ -15,9 +15,9 @@ export const SUPABASE_AUDIO_BUCKET = 'echoes';
 // No map token anywhere in the repo (GitHub secret scanning blocked the old Mapbox token).
 
 // --- Version (shown in the About sheet; keep SW_CACHE in step with VERSION in sw.js) --------------------------
-export const APP_VERSION = '3.0.2';
-export const APP_BUILD = '2026-11-15 · exact pins, blur toggle, offline outbox';
-export const SW_CACHE = 'echolocation-v6.2-exact';
+export const APP_VERSION = '4.0.0';
+export const APP_BUILD = '2026-11-15 · transcripts, replies, capsules, trails';
+export const SW_CACHE = 'echolocation-v7.0-v2features';
 
 // --- Echo rules ---------------------------------------------------------------
 export const ECHO_TTL_MS = 24 * 60 * 60 * 1000;          // an Echo decays 24 h after it is dropped

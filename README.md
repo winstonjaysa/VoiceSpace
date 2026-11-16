@@ -133,3 +133,15 @@ Add `?desk` to the URL for desk mode (keyboard/drag simulation via `js/desk-sim.
 `/debug.html` (unlisted, no token needed) uses MapLibre GL JS on OpenFreeMap dark tiles to show every Echo (including expired ones, greyed out) as a dot with an
 accuracy halo. Click a dot for a popup with created/expires/accuracy/audio. The table below the map lists the
 same data. "Show my position" adds your location.
+
+## v4 additions (trax modules, `js/v2/`)
+
+| Feature | Before migration-v2.sql | After |
+|---|---|---|
+| Live transcript + tags while recording (Web Speech) | Shown locally; drop works with or without a transcript (not sent) | Sent with the drop (`transcript`, `tags`) |
+| Replies (`canReplyHere` → “walk N m closer”, `replyTo` threading, thread list) | Reply button disabled with a hint | Enabled; threads via `echo_replies` |
+| Time capsules (presets with “opens in X”) | Chips shown, disabled with a hint | `unlock_at` sent |
+| Trails (create, drop onto, nearby, walk with next-stop distance / direction / arrived / progress) | About sheet shows a hint | Enabled |
+
+v2 features switch on by themselves when `map_echoes` answers (no reload). No v2 RPC is called before then.
+Copied verbatim from trax (`/home/box/shared/echolocation/v2/trax/`); edit there, then copy again.
