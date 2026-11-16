@@ -2,28 +2,44 @@
 Connect with Voice.
 
 **Echolocation** is a mobile web app (PWA). Record a short audio clip (an *Echo*) and drop it where you stand.
-**v2:** the home screen is a shared live map. Every Echo shows up for everyone, within about a second, as a soft
-30–60 m glow that contains the real spot but is never centred on it. To *hear* an Echo you still have to walk
+**v3:** the home screen is a shared live map. Every Echo shows up for everyone, within about a second, as an
+**exact pin** (small glowing dot with a sonar ripple) where it was dropped. On the review screen, **Blur my spot**
+(off by default) turns that echo into a soft 30–60 m glow instead. To *hear* an Echo you still have to walk
 there: pings speed up as you close in, then you *tune in* by pointing the phone (compass + spatial audio).
 Echoes decay after 24 h, and each *resonate* from a listener extends their life (and makes its glow brighter).
 
 Live: https://winstonjaysa.github.io/VoiceSpace/ (GitHub Pages, branch `main`, path `/`).
 No build step: plain HTML/CSS and ES modules. All paths are relative, so it works under `/VoiceSpace/`.
 
+## Backend: ONE migration to paste
+**Paste only night crawler's combined file** `/home/box/shared/echolocation/v2/night-crawler/migration-v2.sql`
+into the Supabase SQL editor. It contains everything the map needs (`map_echoes` exact-unless-blurred, `blurred` +
+`place_label` columns, the `echo-map` Realtime trigger) plus heat, reports/auto-hide, rate limits, zones and trails.
+`backend/migrations/002_map_realtime.sql` is **superseded**: kept for history, refuses to run once v2 is installed.
+The client (`js/echoes-client-v2.js`, night crawler's, verbatim) works before and after the paste:
+* before: map from `debug_echoes` (exact), blur choice stored as a `[[blur]]` caption marker, phones broadcast their own drops;
+* after: `map_echoes` + `drop_echo(..., place_label, blurred)` + DB trigger broadcasts. The app notices by itself
+  (the missing-function 404 is cached per session and re-checked once a minute, and a trigger broadcast switches it at once).
+
+## v3 additions
+| What | Where |
+|---|---|
+| Exact pins, "Blur my spot" toggle | `js/map.js` (pin-* layers vs echo-* glow layers), `js/record.js`, `js/echo-store.js` `mapRecord()` |
+| GPS accuracy pill (±m, green ≤10 m / amber ≤25 m / red), heading cone (compass, GPS course fallback), follow-me + Re-center | `js/app.js`, `js/map.js` |
+| Offline outbox: drops without a connection queue in IndexedDB (`outbox` store), retry on `online`, app start and every 20 s; "Queued, will upload" pill + pending pin | `js/echo-store.js` `flushOutbox()` |
+| Toasts for failures, map skeleton, aria labels, About sheet with version | `js/app.js`, `index.html`, `css/app.css` |
+| Hunt v2 (night crawler): step-counting fusion, instant start from the map's last fix, single-reading fallback after 4 s, "Precise Location is off" / weak-GPS hints | `js/hunt-core.js`, `js/fusion.js`, `js/listen.js` |
+
 ## v2 shared map (stage 1)
 | Path | What |
 |---|---|
 | `js/map.js` | MapLibre GL JS (unpkg CDN) on free, no-key tiles: OpenFreeMap `dark` (CARTO dark-matter fallback). Glows sized in metres, brightness = resonances, fade = time left, clustering, your dot + accuracy ring, sonar ripple (off with reduced motion) |
 | `js/map-feed.js` | Live echo list: polls the viewport every 5 s + Supabase Realtime broadcast topic `echo-map` (`drop` / `update` / `gone`). Broadcasts are hints; polls confirm them |
-| `js/fuzz.js` | Client-side fuzz (fallback until migration 002 runs): deterministic per echo id |
-| `js/echo-store.js` `mapEchoes()` | `map_echoes` RPC (server fuzz) when present, else `debug_echoes` / `nearby_echoes` + client fuzz. Re-checks for the RPC every minute |
+| `js/fuzz.js` | Client-side blur for "Blur my spot" echoes (until migration-v2 runs): deterministic per echo id |
+| `js/echo-store.js` `mapEchoes()` | `map_echoes` RPC when present, else `debug_echoes` (exact; blurred ones by caption marker) / `nearby_echoes`. Missing RPC cached per session, re-checked every minute |
 | `js/precise-fix.js` | Cooker's drop-time GPS lock: 3–8 s of fresh fixes, weak ones and multipath jumps dropped, accuracy-weighted average (~3.5 m vs 27 m in `tests/precise-fix.test.mjs`). Used by **Drop here** and, as a ~3 s lock, for the hunt's server unlock/resonate gates. `placeLabel()` names the spot via Nominatim (Photon fallback), no key |
 | `js/listen.js` | Hunt overlay. "Walk to it" hunts only the chosen echo (500 m search radius); beyond that it points at the glow |
-| `backend/migrations/002_map_realtime.sql` | Paste once into the Supabase SQL editor: secret-salted server-side fuzz, `map_echoes(min_lat, min_lng, max_lat, max_lng)`, and a trigger that broadcasts fuzzed changes on `echo-map` |
-
-Until the migration runs, the phone that drops (or resonates, or retracts) an echo broadcasts the change itself,
-and the map fuzzes on the phone. Exact coordinates still reach the browser through `debug_echoes` and
-`nearby_echoes` before that. After the migration the map only ever sees salted, server-fuzzed glows.
+| `backend/migrations/002_map_realtime.sql` | **SUPERSEDED, do not run** (folded into night crawler's migration-v2.sql) |
 
 ## Run locally
 ```sh
@@ -37,7 +53,7 @@ Mic, geolocation and compass need a secure context: `localhost` or HTTPS.
 | `index.html`, `js/app.js`, `css/app.css` | App shell: tab bar (Drop / Listen), hash routing, SW registration | raptor |
 | `js/record.js`, `css/record.css` | **Record-and-drop screen**. Self-contained (markup + logic); mount via `mountRecordScreen(el)` | raptor (trax may replace) |
 | `js/config.js` | Public config: Supabase URL/anon key (empty = local fallback), echo rules. No map token (v2 tiles need none) | raptor |
-| `js/echo-store.js` | **Data seam (the one store).** Supabase via `echoes-client.js`, IndexedDB fallback, hunt source adapter | raptor |
+| `js/echo-store.js` | **Data seam (the one store).** Supabase via `echoes-client-v2.js`, IndexedDB fallback, hunt source adapter | raptor |
 | `js/echoes-client.js` | night crawler's Supabase client, copied verbatim from `backend/echoes-client.js` | night crawler |
 | `js/listen.js` | Listen tab: intro + Start listening; hides it and gives the screen to the hunt ring | raptor |
 | `js/hunt.js` | `startHunt(container, { store })`: thin wrapper (UI + source) over the engine | trax (wrapper) |
