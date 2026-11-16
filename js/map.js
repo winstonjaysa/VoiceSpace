@@ -1,5 +1,6 @@
-// map.js: the shared live map (MapLibre GL JS, free no-key vector tiles). Draws every Echo as a soft glow
-// (30–60 m, fuzzed centre), clusters when zoomed out, and your own position with an accuracy ring.
+// map.js: the shared live map (MapLibre GL JS, free no-key vector tiles). Every Echo is an EXACT pin (small glowing
+// dot + sonar ripple) at the spot it was dropped; echoes dropped with "Blur my spot" are a soft 30–60 m glow instead.
+// Clusters when zoomed out. You: dot, accuracy ring, and a heading cone (compass / GPS course).
 // MapLibre is loaded as a global (<script> from unpkg in index.html / debug.html).
 
 export const STYLES = [
@@ -37,7 +38,8 @@ function tintBaseStyle(map) {
   }
 }
 
-export function createMapView(container, { center, zoom = 15.3, onSelect = () => {}, onMove = () => {}, onReady = () => {}, onError = () => {} } = {}) {
+export function createMapView(container, { center, zoom = 15.3, onSelect = () => {}, onMove = () => {}, onReady = () => {}, onError = () => {},
+  onUserPan = () => {} } = {}) {
   const ml = window.maplibregl;
   if (!ml) throw new Error('MapLibre failed to load');
   let styleIx = 0, ready = false, echoes = [], me = null, raf = 0, styleTimer = null;
@@ -46,6 +48,13 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     attributionControl: false, pitchWithRotate: false, dragRotate: false, maxPitch: 0, fadeDuration: 150,
   });
   map.touchZoomRotate.disableRotation();
+  // Base styles reference sprite images (e.g. 'wood-pattern') that aren't always in the sprite: give MapLibre a
+  // transparent stand-in instead of a console warning.
+  map.on('styleimagemissing', (e) => {
+    if (!map.hasImage(e.id)) map.addImage(e.id, { width: 1, height: 1, data: new Uint8Array(4) });
+  });
+  map.on('dragstart', (e) => { if (e.originalEvent) onUserPan(); });
+  map.getCanvas().setAttribute('aria-label', 'Map of echoes near you');
   map.addControl(new ml.AttributionControl({ compact: true }), 'bottom-left');
 
   // fall back to the second no-key style if the first can't load within 8 s
@@ -57,6 +66,7 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
   map.on('error', (e) => {
     const msg = String(e?.error?.message || '');
     if (!ready && /style|Failed to fetch|NetworkError/i.test(msg)) fallback();
+    console.info('[map]', msg || e);
     onError(e);
   });
 
@@ -69,13 +79,15 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
       return { type: 'Feature', id: hashId(e.id), geometry: { type: 'Point', coordinates: [e.lng, e.lat] }, properties: {
         id: e.id, rpx0: (e.radius_m || 45) / (M_PER_PX_Z0 * Math.cos(e.lat * Math.PI / 180)),
         heat, life: Math.max(0.12, Math.min(1, left / DAY)), fresh: e.freshUntil > now ? 1 : 0, mine: e.mine ? 1 : 0,
+        blurred: e.blurred || e.radius_m > 0 ? 1 : 0, pending: e.queued ? 1 : 0,
       } };
     }) };
   }
   function meFeatures() {
     if (!me) return empty();
     return { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: [me.lng, me.lat] },
-      properties: { rpx0: Math.max(3, me.accuracy || 10) / (M_PER_PX_Z0 * Math.cos(me.lat * Math.PI / 180)) } }] };
+      properties: { rpx0: Math.max(3, me.accuracy || 10) / (M_PER_PX_Z0 * Math.cos(me.lat * Math.PI / 180)),
+        ...(Number.isFinite(me.heading) ? { heading: me.heading } : {}) } }] };
   }
 
   function addLayers() {
@@ -83,7 +95,10 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     map.addSource('echoes', { type: 'geojson', data: toFeatures(echoes), cluster: true, clusterMaxZoom: 13, clusterRadius: 46,
       clusterProperties: { heat: ['max', ['get', 'heat']], fresh: ['max', ['get', 'fresh']] } });
     map.addSource('me', { type: 'geojson', data: meFeatures() });
-    const unclustered = ['!', ['has', 'point_count']];
+    const single = ['!', ['has', 'point_count']];
+    const unclustered = ['all', single, ['==', ['get', 'blurred'], 1]];      // blurred: glow layers
+    const exact = ['all', single, ['==', ['get', 'blurred'], 0]];            // exact pins
+    if (!map.hasImage('me-cone')) map.addImage('me-cone', coneImage(), { pixelRatio: 2 });
     // clusters: a soft halo + thin ring + count
     map.addLayer({ id: 'cluster-halo', type: 'circle', source: 'echoes', filter: ['has', 'point_count'], paint: {
       'circle-color': HEAT_COLOR, 'circle-blur': 1,
@@ -111,7 +126,27 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
       'circle-stroke-color': HEAT_COLOR, 'circle-stroke-opacity': 0 } });
     map.addLayer({ id: 'echo-flash', type: 'circle', source: 'echoes', filter: ['all', unclustered, ['==', ['get', 'fresh'], 1]], paint: {
       'circle-radius': metres(2.4), 'circle-color': '#e9f6ff', 'circle-blur': 1, 'circle-opacity': 0.35 } });
+    // exact pins: soft halo, sonar ripple, bright core (queued/pending ones are dim and warm)
+    const pinR = (a, b) => ['interpolate', ['linear'], ['zoom'], 11, a, 18, b];
+    map.addLayer({ id: 'pin-halo', type: 'circle', source: 'echoes', filter: exact, paint: {
+      'circle-radius': pinR(9, 20), 'circle-color': HEAT_COLOR, 'circle-blur': 1,
+      'circle-opacity': ['*', ['get', 'life'], ['case', ['==', ['get', 'pending'], 1], 0.25, ['+', 0.45, ['*', 0.3, ['get', 'heat']]]]] } });
+    map.addLayer({ id: 'pin-ripple', type: 'circle', source: 'echoes', filter: ['all', exact, ['==', ['get', 'pending'], 0]], paint: {
+      'circle-radius': pinR(8, 16), 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-width': 1.2,
+      'circle-stroke-color': HEAT_COLOR, 'circle-stroke-opacity': 0 } });
+    map.addLayer({ id: 'pin-core', type: 'circle', source: 'echoes', filter: exact, paint: {
+      'circle-radius': pinR(3.2, 5.5),
+      'circle-color': ['case', ['==', ['get', 'pending'], 1], '#f2d3b0', '#f4fbff'],
+      'circle-opacity': ['case', ['==', ['get', 'pending'], 1], 0.55, 1],
+      'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 11, 1.2, 18, 2],
+      'circle-stroke-color': ['case', ['==', ['get', 'pending'], 1], '#f2d3b0', HEAT_COLOR] } });
+    map.addLayer({ id: 'pin-flash', type: 'circle', source: 'echoes', filter: ['all', exact, ['==', ['get', 'fresh'], 1]], paint: {
+      'circle-radius': pinR(18, 34), 'circle-color': '#e9f6ff', 'circle-blur': 1, 'circle-opacity': 0.35 } });
     // you
+    map.addLayer({ id: 'me-cone', type: 'symbol', source: 'me', filter: ['has', 'heading'], layout: {
+      'icon-image': 'me-cone', 'icon-rotate': ['get', 'heading'], 'icon-rotation-alignment': 'map',
+      'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-size': ['interpolate', ['linear'], ['zoom'], 12, 0.7, 18, 1.1] },
+      paint: { 'icon-opacity': 0.9 } });
     map.addLayer({ id: 'me-acc', type: 'circle', source: 'me', paint: {
       'circle-radius': metres(1), 'circle-color': 'rgba(210,225,255,0.07)', 'circle-stroke-width': 1, 'circle-stroke-color': 'rgba(210,225,255,0.22)' } });
     map.addLayer({ id: 'me-glow', type: 'circle', source: 'me', paint: { 'circle-radius': 16, 'circle-color': '#dfe9ff', 'circle-blur': 1, 'circle-opacity': 0.35 } });
@@ -127,7 +162,7 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     animate();
   });
 
-  const echoLayers = ['echo-field', 'echo-haze', 'echo-bloom'];
+  const echoLayers = ['echo-field', 'echo-haze', 'echo-bloom', 'pin-halo', 'pin-core'];
   map.on('click', (ev) => {
     if (!ready) return;
     const pad = 14, p = ev.point;
@@ -171,6 +206,10 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
       map.setPaintProperty('echo-ripple', 'circle-radius', metres(0.35 + 1.1 * ease));
       map.setPaintProperty('echo-ripple', 'circle-stroke-opacity', ['*', ['get', 'life'], 0.55 * (1 - k)]);
       map.setPaintProperty('echo-flash', 'circle-opacity', 0.15 + 0.25 * Math.abs(Math.sin(t / 380)));
+      const k2 = ((t + 900) % 2600) / 2600, e2 = 1 - (1 - k2) ** 2;
+      map.setPaintProperty('pin-ripple', 'circle-radius', ['interpolate', ['linear'], ['zoom'], 11, 4 + 14 * e2, 18, 6 + 30 * e2]);
+      map.setPaintProperty('pin-ripple', 'circle-stroke-opacity', ['*', ['get', 'life'], 0.7 * (1 - k2)]);
+      map.setPaintProperty('pin-flash', 'circle-opacity', 0.15 + 0.25 * Math.abs(Math.sin(t / 380)));
     };
     raf = requestAnimationFrame(tick);
   }
@@ -189,6 +228,9 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
     flyTo({ lat, lng }, z) {
       map.flyTo({ center: [lng, lat], zoom: z ?? Math.max(map.getZoom(), 15.5), duration: reducedMotion() ? 0 : 1100, essential: true });
     },
+    follow({ lat, lng }) {
+      map.easeTo({ center: [lng, lat], duration: reducedMotion() ? 0 : 600, essential: true });
+    },
     jumpTo({ lat, lng }, z) { map.jumpTo({ center: [lng, lat], zoom: z ?? map.getZoom() }); },
     project({ lat, lng }) { return map.project([lng, lat]); },
     bounds() { const b = map.getBounds(); return { minLat: b.getSouth(), minLng: b.getWest(), maxLat: b.getNorth(), maxLng: b.getEast() }; },
@@ -198,5 +240,16 @@ export function createMapView(container, { center, zoom = 15.3, onSelect = () =>
   return api;
 }
 
+/** Heading cone: a soft wedge pointing north from the image centre (rotated by heading on the map). */
+function coneImage() {
+  const S = 160, c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d'), cx = S / 2, cy = S / 2, R = S / 2;
+  const grad = g.createRadialGradient(cx, cy, 4, cx, cy, R);
+  grad.addColorStop(0, 'rgba(223,233,255,0.85)'); grad.addColorStop(0.55, 'rgba(169,162,240,0.35)'); grad.addColorStop(1, 'rgba(169,162,240,0)');
+  g.fillStyle = grad; g.beginPath(); g.moveTo(cx, cy);
+  const half = 32 * Math.PI / 180, up = -Math.PI / 2;
+  g.arc(cx, cy, R, up - half, up + half); g.closePath(); g.fill();
+  return g.getImageData(0, 0, S, S);
+}
 function dist2(a, b) { return (a.x - b.x) ** 2 + (a.y - b.y) ** 2; }
 function hashId(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0; return Math.abs(h); }

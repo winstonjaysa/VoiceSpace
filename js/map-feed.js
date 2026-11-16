@@ -1,10 +1,11 @@
 // map-feed.js: keeps the shared map's echo list live.
 //   1. Viewport polling: store.mapEchoes(bbox) every POLL_MS while the page is visible, and right after the map moves.
 //   2. Supabase Realtime broadcast on the public topic 'echo-map' (works with the publishable key, no schema change):
-//        'drop' / 'update' { id, lat, lng, radius_m, resonance_count, created_at, expires_at }  (lat/lng FUZZED)
+//        'drop' / 'update' { id, lat, lng, radius_m, resonance_count, created_at, expires_at, blurred, fuzz }
+//            radius_m 0 = exact pin; blurred echoes carry a 30–60 m glow centre instead of the spot
 //        'gone'            { id }
-//      After backend/migrations/002_map_realtime.sql a database trigger sends these (server-side fuzz).
-//      Before it, the dropping phone broadcasts its own (client-fuzzed) drop/resonate/retract.
+//      After night crawler's migration-v2.sql a database trigger sends these (fuzz 'none' | 'server').
+//      Before it, the dropping phone broadcasts its own drop/resonate/retract (fuzz 'self' | 'client').
 //   Broadcasts are untrusted hints: anything a poll of that area doesn't confirm is removed again.
 import * as store from './echo-store.js';
 import { fuzzPoint } from './fuzz.js';
@@ -17,11 +18,11 @@ const MAX_SPAN_DEG = 1.2;         // never ask for more than ~130 km of map at o
 const finite = Number.isFinite;
 function validPayload(p) {
   return p && typeof p.id === 'string' && /^[0-9a-f-]{8,64}$/i.test(p.id) && finite(p.lat) && finite(p.lng)
-    && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180 && finite(p.radius_m) && p.radius_m >= 10 && p.radius_m <= 120
+    && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180 && finite(p.radius_m) && (p.radius_m === 0 || (p.radius_m >= 10 && p.radius_m <= 120))
     && !Number.isNaN(Date.parse(p.expires_at)) && Date.parse(p.expires_at) < Date.now() + 8 * 24 * 3600e3;
 }
 
-export function createMapFeed({ onChange = () => {}, onStatus = () => {} } = {}) {
+export function createMapFeed({ onChange = () => {}, onStatus = () => {}, onError = () => {} } = {}) {
   const echoes = new Map();       // id -> map record (+ seenAt, via, freshUntil)
   let bounds = null, timer = null, inflight = null, queued = false, channel = null, rtState = 'off';
   let lastPollAt = 0, lastError = null, destroyed = false;
@@ -63,8 +64,10 @@ export function createMapFeed({ onChange = () => {}, onStatus = () => {} } = {})
         sweepExpired();
         emit();
       } catch (e) {
+        const first = !lastError;
         lastError = e?.message || String(e);
         console.warn('[map-feed] poll failed', e);
+        if (first) try { onError(e); } catch { /* ignore */ }
       } finally {
         inflight = null; status();
         if (queued) { queued = false; poll(); }
@@ -85,11 +88,14 @@ export function createMapFeed({ onChange = () => {}, onStatus = () => {} } = {})
     const onMsg = (via) => ({ event, payload }) => {
       if (event === 'gone') { if (payload?.id && echoes.delete(payload.id)) emit(); return; }
       if (!validPayload(payload)) return;
+      // Only migration-v2's trigger sends heat + fuzz 'none'/'server': map_echoes must exist now, switch over.
+      if ('heat' in payload && (payload.fuzz === 'none' || payload.fuzz === 'server')) store.hintMigrationLive?.();
+      const blurred = Boolean(payload.blurred) || payload.radius_m > 0;
       const rec = {
-        id: payload.id, lat: payload.lat, lng: payload.lng, radius_m: payload.radius_m,
+        id: payload.id, lat: payload.lat, lng: payload.lng, radius_m: blurred ? Math.max(10, payload.radius_m) : 0, blurred,
         resonance_count: Math.max(0, payload.resonance_count | 0), created_at: payload.created_at || null,
-        expires_at: new Date(payload.expires_at).toISOString(), fuzz: payload.fuzz === 'server' ? 'server' : 'client',
-        source: 'supabase',
+        expires_at: new Date(payload.expires_at).toISOString(), heat: finite(payload.heat) ? payload.heat : null,
+        fuzz: blurred ? (payload.fuzz === 'server' ? 'server' : 'client') : 'none', source: 'supabase',
       };
       upsert(rec, via); emit();
       window.dispatchEvent(new CustomEvent('echo-map:realtime', { detail: { event, id: rec.id, at: Date.now() } }));
@@ -107,9 +113,11 @@ export function createMapFeed({ onChange = () => {}, onStatus = () => {} } = {})
   };
   const onDrop = (ev) => {
     const e = ev.detail; if (!e?.id || !finite(e.lat)) return;
-    const f = fuzzPoint(e.id, e.lat, e.lng);
-    const rec = { id: e.id, lat: f.lat, lng: f.lng, radius_m: f.radiusM, resonance_count: e.resonance_count ?? 0,
-      created_at: e.created_at, expires_at: e.expires_at, fuzz: 'client', source: e.source, mine: true };
+    // Exact pin unless "Blur my spot" was on (then the same deterministic glow every client computes).
+    const f = e.blurred ? fuzzPoint(e.id, e.lat, e.lng) : { lat: e.lat, lng: e.lng, radiusM: 0 };
+    const rec = { id: e.id, lat: f.lat, lng: f.lng, radius_m: f.radiusM, blurred: Boolean(e.blurred),
+      resonance_count: e.resonance_count ?? 0, created_at: e.created_at, expires_at: e.expires_at,
+      fuzz: e.blurred ? 'client' : 'self', source: e.source, mine: true, queued: Boolean(e.queued) };
     upsert(rec, 'self'); emit();
     if (e.source === 'supabase') {
       if (store.mapMode === 'map_echoes') setTimeout(poll, 600);  // pick up the server-fuzzed glow
@@ -123,12 +131,13 @@ export function createMapFeed({ onChange = () => {}, onStatus = () => {} } = {})
     if (exp) e.expires_at = new Date(exp).toISOString();
     emit();
     if (e.source === 'supabase') selfBroadcast('update', { id: e.id, lat: e.lat, lng: e.lng, radius_m: e.radius_m,
-      resonance_count: e.resonance_count, created_at: e.created_at, expires_at: e.expires_at, fuzz: e.fuzz });
+      blurred: Boolean(e.blurred), resonance_count: e.resonance_count, created_at: e.created_at, expires_at: e.expires_at,
+      fuzz: e.blurred ? 'client' : 'self' });
   };
   const onRetract = (ev) => {
     const id = ev.detail?.id; if (!id) return;
     const e = echoes.get(id); echoes.delete(id); emit();
-    if (e?.source !== 'local') selfBroadcast('gone', { id });
+    if (e && e.source === 'supabase' && !String(id).startsWith('q-')) selfBroadcast('gone', { id });
   };
   store.events.addEventListener('drop', onDrop);
   store.events.addEventListener('resonate', onResonate);

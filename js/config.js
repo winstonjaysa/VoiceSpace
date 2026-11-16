@@ -14,6 +14,11 @@ export const SUPABASE_AUDIO_BUCKET = 'echoes';
 // v2 uses MapLibre GL JS with free, no-key vector tiles (OpenFreeMap dark, CARTO dark-matter fallback; see js/map.js).
 // No map token anywhere in the repo (GitHub secret scanning blocked the old Mapbox token).
 
+// --- Version (shown in the About sheet; keep SW_CACHE in step with VERSION in sw.js) --------------------------
+export const APP_VERSION = '3.0.0';
+export const APP_BUILD = '2026-11-15 · exact pins, blur toggle, offline outbox';
+export const SW_CACHE = 'echolocation-v6.0-exact';
+
 // --- Echo rules ---------------------------------------------------------------
 export const ECHO_TTL_MS = 24 * 60 * 60 * 1000;          // an Echo decays 24 h after it is dropped
 export const RESONATE_EXTENSION_MS = 12 * 60 * 60 * 1000; // local fallback only; server rule (echo_rules) is +12 h, capped at 7 d

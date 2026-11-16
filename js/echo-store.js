@@ -18,7 +18,7 @@ import {
   SUPABASE_URL, SUPABASE_ANON_KEY,
   ECHO_TTL_MS, RESONATE_EXTENSION_MS, DEFAULT_NEARBY_RADIUS_M,
 } from './config.js';
-import * as sbClient from './echoes-client.js'; // night crawler's Supabase client (see SUPABASE BACKEND below)
+import * as sbClient from './echoes-client-v2.js'; // night crawler's v2 client, verbatim (drop-in superset of v1)
 import { fuzzPoint } from './fuzz.js';
 
 // Fires 'drop', 'resonate' and 'backend' (fell back to local) events (detail = echo record) so screens can refresh.
@@ -62,6 +62,8 @@ export function normalizeDropInput(input = {}) {
     heading: pick(input.heading, input.headingDeg, input.heading_deg) ?? null,
     altitude: pick(input.altitude, input.altitudeM, input.altitude_m) ?? null,
     caption: pick(input.caption) ?? null,
+    blurred: Boolean(pick(input.blurred, input.blur)),
+    placeLabel: pick(input.placeLabel, input.place_label) ?? null,   // "Blur my spot": show a 30–60 m glow instead of the exact pin
   };
 }
 
@@ -85,7 +87,7 @@ export function extForMime(mimeType = '') {
 // LOCAL FALLBACK BACKEND (IndexedDB) - single device only
 // ---------------------------------------------------------------------------
 const DB_NAME = 'echolocation';
-const DB_VERSION = 1;
+const DB_VERSION = 2;              // v2 adds the 'outbox' store (drops waiting for a connection)
 let dbPromise = null;
 
 function openDb() {
@@ -96,6 +98,7 @@ function openDb() {
       const db = req.result;
       if (!db.objectStoreNames.contains('echoes')) db.createObjectStore('echoes', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('audio')) db.createObjectStore('audio', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('outbox')) db.createObjectStore('outbox', { keyPath: 'qid' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -111,7 +114,7 @@ const audioUrlCache = new Map(); // id -> objectURL
 const localBackend = {
   name: 'local-indexeddb',
 
-  async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude }) {
+  async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude, caption, blurred }) {
     validateDrop({ blob, lat, lng });
     const db = await openDb();
     const id = newId();
@@ -128,6 +131,8 @@ const localBackend = {
       audio_path: `local:${id}.${extForMime(mimeType || blob.type)}`,
       duration_ms: Math.round(durationMs || 0),
       mime_type: mimeType || blob.type || 'application/octet-stream',
+      caption: caption || null,
+      blurred: Boolean(blurred),
     };
     // Store the Blob directly (IndexedDB supports Blobs, incl. iOS Safari 14+).
     const buf = await blob.arrayBuffer(); // ArrayBuffer is the most portable IDB value
@@ -184,8 +189,9 @@ const localBackend = {
 };
 
 // ---------------------------------------------------------------------------
-// SUPABASE BACKEND: delegates to night crawler's final client js/echoes-client.js (copied verbatim from
-// /home/box/shared/echolocation/backend/echoes-client.js; supabase-js loaded from esm.sh on first use).
+// SUPABASE BACKEND: delegates to night crawler's v2 client js/echoes-client-v2.js (copied verbatim from
+// /home/box/shared/echolocation/v2/night-crawler/echoes-client-v2.js; supabase-js loaded from esm.sh on first use).
+// Works before AND after migration-v2.sql: v2-only RPCs raise V2_MISSING, which we treat as "use the v1 path".
 // Schema (backend/schema.sql, re-checked 2026-11-03 04:05):
 //   drop_echo(lat,lng,accuracy_m,heading_deg,altitude_m,audio_path,duration_s,mime_type,device_id,caption) -> uuid
 //   nearby_echoes(lat,lng,radius_m)  -> [{id,echo_lat,echo_lng,distance_m,bearing_deg,heading_deg,altitude_m,expires_at,resonance_count}]
@@ -226,7 +232,7 @@ export class SupabaseError extends Error {
 const UNAVAILABLE_CODES = new Set(['SCHEMA_MISSING', 'NETWORK', 'NOT_INITIALISED', 'FORBIDDEN']);
 function toSbError(err) {
   if (err instanceof SupabaseError) return err;
-  const msg = String(err?.message || err);
+  const msg = String(err?.friendly && !UNAVAILABLE_CODES.has(err?.code) ? err.friendly : err?.message || err);
   const unavailable = UNAVAILABLE_CODES.has(err?.code) || /bucket not found|failed to fetch|import|esm\.sh|load failed/i.test(msg)
     || err?.cause?.status >= 500;
   return new SupabaseError(msg, { code: err?.code, unavailable, cause: err });
@@ -256,6 +262,9 @@ function fromServerRow(r, extra = {}) {
     mime_type: r.mime_type ?? null,
     distance_m: r.distance_m,
     bearing_deg: r.bearing_deg,                                     // user -> echo, 0 = north, clockwise
+    ...('caption' in r ? { caption: stripBlurMarker(r.caption) } : {}),
+    ...('blurred' in r || 'caption' in r ? { blurred: Boolean(r.blurred) || hasBlurMarker(r.caption) } : {}),
+    ...(r.place_label ? { place_label: r.place_label } : {}),
     source: 'supabase',
     ...extra,
   };
@@ -264,18 +273,26 @@ function fromServerRow(r, extra = {}) {
 const supabaseBackend = {
   name: 'supabase',
 
-  async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude, caption }) {
+  async dropEcho({ blob, mimeType, durationMs, lat, lng, accuracyM, heading, altitude, caption, blurred, placeLabel }) {
     validateDrop({ blob, lat, lng });
     // echoes-client derives the type from blob.type; make sure it carries the recorder's mimeType.
     const typed = blob.type ? blob : new Blob([blob], { type: mimeType || 'audio/webm' });
     const durationS = Math.min(60, Math.max(0.1, (durationMs || 0) / 1000));
-    const id = await sb(() => sbClient.dropEcho({ blob: typed, lat, lng, accuracyM, heading, altitude, durationS, caption }));
+    // migration-v2 live (map_echoes answered): send blurred + place_label as columns. Before it, drop_echo has no
+    // such parameters, so call it exactly like v1 and keep the blur choice as a caption marker (maps read it back).
+    const v2 = mapMode === 'map_echoes';
+    const args = { blob: typed, lat, lng, accuracyM, heading, altitude, durationS };
+    if (v2) Object.assign(args, { caption, placeLabel: placeLabel || null, blurred: Boolean(blurred) });
+    else args.caption = blurred ? withBlurMarker(caption) : caption;
+    const id = await sb(() => sbClient.dropEcho(args));
+    const blurVia = blurred ? (v2 ? 'column' : 'caption') : null;
     const now = Date.now();
     return {
       id, lat, lng, accuracy_m: numOrNull(accuracyM), heading: numOrNull(heading), altitude: numOrNull(altitude),
       created_at: new Date(now).toISOString(), expires_at: new Date(now + ECHO_TTL_MS).toISOString(),
       resonance_count: 0, audio_path: null, duration_ms: Math.round(durationMs || 0),
       mime_type: (typed.type || '').split(';')[0], source: 'supabase',
+      blurred: Boolean(blurred), blur_via: blurVia, place_label: placeLabel || null,
     };
   },
 
@@ -321,21 +338,36 @@ const supabaseBackend = {
 // ---------------------------------------------------------------------------
 const supabaseConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 let supabaseDown = !supabaseConfigured;
+let downForNetwork = false;          // true when the fallback was caused by a lost connection (retry on 'online')
+const isOfflineNow = () => typeof navigator !== 'undefined' && navigator.onLine === false;
+function isNetworkError(err) {
+  return err?.code === 'NETWORK' || /failed to fetch|load failed|network|fetch failed|timed? ?out/i.test(String(err?.message || ''));
+}
+/** After a lost connection comes back, try Supabase again (it stays down for real schema/config problems). */
+export function reviveBackend() {
+  if (!supabaseConfigured || !supabaseDown || !downForNetwork) return false;
+  supabaseDown = false; downForNetwork = false; initP = null;
+  backendName = 'supabase'; backendError = null;
+  events.dispatchEvent(new CustomEvent('backend', { detail: { backend: backendName, error: null } }));
+  return true;
+}
 export let backendName = supabaseConfigured ? 'supabase' : localBackend.name;
 export let backendError = supabaseConfigured ? null : 'Supabase not configured';
 
 function fallBack(err) {
-  if (!supabaseDown) console.warn('[echo-store] Supabase unavailable, using local IndexedDB fallback:', err.message);
+  if (!supabaseDown) console.info('[echo-store] Supabase unavailable, using local IndexedDB fallback:', err.message);
   supabaseDown = true;
+  downForNetwork = isNetworkError(err);
   backendName = localBackend.name;
   backendError = err.message;
   events.dispatchEvent(new CustomEvent('backend', { detail: { backend: backendName, error: err.message } }));
 }
 
-async function withFallback(remote, local) {
+async function withFallback(remote, local, { queueOnNetwork = false } = {}) {
   if (!supabaseDown) {
     try { return await remote(); } catch (err) {
       if (!(err instanceof SupabaseError) || !err.unavailable) throw err;
+      if (queueOnNetwork && isNetworkError(err)) throw err;          // caller queues it instead of saving locally
       fallBack(err);
     }
   }
@@ -359,14 +391,136 @@ export async function checkBackend(lat = 0, lng = 0) {
 /** @returns {Promise<Echo>} the dropped echo (record shape in README) */
 export async function dropEcho(rawInput) {
   const input = normalizeDropInput(rawInput);
+  validateDrop(input);
   rememberPos(input.lat, input.lng);
-  const saved = await withFallback(() => supabaseBackend.dropEcho(input),
-    async () => ({ ...(await localBackend.dropEcho(input)), source: 'local' }));
+  let saved;
+  if (supabaseConfigured && isOfflineNow()) {
+    saved = await enqueueDrop(input, 'offline');                     // no connection: outbox, upload later
+  } else {
+    try {
+      saved = await withFallback(() => supabaseBackend.dropEcho(input),
+        async () => ({ ...(await localBackend.dropEcho(input)), source: 'local' }), { queueOnNetwork: true });
+    } catch (err) {
+      if (!(err instanceof SupabaseError && isNetworkError(err))) throw err;
+      saved = await enqueueDrop(input, err.message);                // connection dropped mid-upload
+    }
+  }
   // Also carry trax's return shape ({ id, audioPath }) so either caller style works.
   const echo = { ...saved, audioPath: saved.audio_path };
   markMine(echo.id);
+  if (echo.queued) outboxChanged();
   events.dispatchEvent(new CustomEvent('drop', { detail: echo }));
   return echo;
+}
+
+// ---------------------------------------------------------------------------
+// OUTBOX: drops made without a connection wait in IndexedDB ('outbox') and upload on 'online', on app start
+// (flushOutbox() from app.js) and every 20 s while anything is queued. A queued echo shows on this phone's map
+// as a dim pending pin (id 'q-…', source 'queued') until the upload replaces it with the real one.
+// Events: 'outbox' { count, sent?, error? }; on upload 'retract' { id: qid, replacedBy } then 'drop' (real echo).
+// ---------------------------------------------------------------------------
+async function enqueueDrop(input, reason) {
+  const db = await openDb();
+  const qid = `q-${globalThis.crypto?.randomUUID?.() || newId()}`;
+  const now = Date.now();
+  const rec = {
+    qid, queued_at: new Date(now).toISOString(), tries: 0, last_error: String(reason || 'offline'),
+    input: { ...input, blob: undefined }, mime_type: input.mimeType || input.blob.type || 'audio/webm',
+    data: await input.blob.arrayBuffer(),
+  };
+  const tx = db.transaction('outbox', 'readwrite'); tx.objectStore('outbox').put(rec); await txDone(tx);
+  scheduleOutboxRetry();
+  outboxChanged();
+  return queuedEcho(rec);
+}
+function queuedEcho(rec) {
+  const i = rec.input;
+  const t = Date.parse(rec.queued_at);
+  return {
+    id: rec.qid, lat: i.lat, lng: i.lng, accuracy_m: numOrNull(i.accuracyM), heading: numOrNull(i.heading),
+    altitude: numOrNull(i.altitude), created_at: rec.queued_at, expires_at: new Date(t + ECHO_TTL_MS).toISOString(),
+    resonance_count: 0, audio_path: null, duration_ms: Math.round(i.durationMs || 0), mime_type: rec.mime_type,
+    blurred: Boolean(i.blurred), place_label: i.placeLabel ?? null, caption: i.caption ?? null,
+    source: 'queued', queued: true, last_error: rec.last_error,
+  };
+}
+async function readOutbox() {
+  try { const db = await openDb(); return await reqP(db.transaction('outbox').objectStore('outbox').getAll()); } catch { return []; }
+}
+/** Queued drops as echo records (newest first). */
+export async function listOutbox() {
+  return (await readOutbox()).map(queuedEcho).sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+export async function outboxCount() { return (await readOutbox()).length; }
+async function outboxChanged(extra = {}) {
+  events.dispatchEvent(new CustomEvent('outbox', { detail: { count: await outboxCount(), ...extra } }));
+}
+/** Attach the place label to a queued drop once the reverse-geocode comes back (it was looked up after Drop). */
+export async function setQueuedPlaceLabel(qid, label) {
+  if (!String(qid).startsWith('q-') || !label) return;
+  const db = await openDb(); const tx = db.transaction('outbox', 'readwrite'); const os = tx.objectStore('outbox');
+  const rec = await reqP(os.get(qid)); if (rec) { rec.input.placeLabel = label; os.put(rec); } await txDone(tx);
+}
+
+let flushing = null, retryTimer = null;
+function scheduleOutboxRetry() {
+  if (retryTimer || typeof setInterval === 'undefined') return;
+  retryTimer = setInterval(async () => {
+    if ((await outboxCount()) === 0) { clearInterval(retryTimer); retryTimer = null; return; }
+    if (!isOfflineNow()) flushOutbox();
+  }, 20_000);
+}
+/** Try to upload every queued drop. Resolves { sent, left }. Safe to call any time (no-op while offline). */
+export function flushOutbox() {
+  if (flushing) return flushing;
+  flushing = (async () => {
+    let sent = 0;
+    const items = (await readOutbox()).sort((a, b) => a.queued_at.localeCompare(b.queued_at));
+    if (!items.length || !supabaseConfigured || isOfflineNow()) return { sent, left: items.length };
+    reviveBackend();
+    const db = await openDb();
+    for (const rec of items) {
+      const input = { ...rec.input, blob: new Blob([rec.data], { type: rec.mime_type }) };
+      let saved = null, err = null;
+      try {
+        if (supabaseDown && !downForNetwork) saved = { ...(await localBackend.dropEcho(input)), source: 'local' };
+        else saved = await supabaseBackend.dropEcho(input);
+      } catch (e) { err = e; }
+      if (err) {
+        const se = err instanceof SupabaseError ? err : toSbError(err);
+        if (isNetworkError(se)) {                                        // still no connection: keep everything queued
+          rec.tries += 1; rec.last_error = se.message;
+          const tx = db.transaction('outbox', 'readwrite'); tx.objectStore('outbox').put(rec); await txDone(tx);
+          await outboxChanged({ error: se.message });
+          scheduleOutboxRetry();
+          return { sent, left: items.length - sent };
+        }
+        // Backend can't take it (schema missing etc.): keep the echo on this phone instead of losing it.
+        if (se.unavailable) saved = { ...(await localBackend.dropEcho(input)), source: 'local' };
+        else {                                                           // rejected (rate limit, zone, invalid)
+          rec.tries += 1; rec.last_error = se.message;
+          const tx = db.transaction('outbox', 'readwrite');
+          if (rec.tries >= 5) tx.objectStore('outbox').delete(rec.qid); else tx.objectStore('outbox').put(rec);
+          await txDone(tx);
+          events.dispatchEvent(new CustomEvent('outbox-failed', { detail: { qid: rec.qid, error: se.message, dropped: rec.tries >= 5 } }));
+          continue;
+        }
+      }
+      const tx = db.transaction('outbox', 'readwrite'); tx.objectStore('outbox').delete(rec.qid); await txDone(tx);
+      sent += 1;
+      const echo = { ...saved, audioPath: saved.audio_path, fromQueue: rec.qid };
+      markMine(echo.id);
+      events.dispatchEvent(new CustomEvent('retract', { detail: { id: rec.qid, replacedBy: echo.id } }));
+      events.dispatchEvent(new CustomEvent('drop', { detail: echo }));
+    }
+    const left = await outboxCount();
+    await outboxChanged({ sent });
+    return { sent, left };
+  })().finally(() => { flushing = null; });
+  return flushing;
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => { reviveBackend(); flushOutbox(); });
 }
 
 /** Non-expired echoes within radiusM, nearest first, each with distance_m and real lat/lng. */
@@ -462,8 +616,12 @@ export function createHuntSource() {
 //   mapMode tells which path is live: 'map_echoes' | 'legacy-debug' | 'legacy-nearby' | 'local'.
 // ---------------------------------------------------------------------------
 export let mapMode = supabaseConfigured ? null : 'local';
-let mapProbeAt = 0;
-const MAP_REPROBE_MS = 60_000;      // re-check for the migration once a minute, so it switches over by itself
+const MAP_PROBE_KEY = 'echolocation.map_echoes_missing_at';
+const MAP_REPROBE_MS = 60_000;      // map_echoes missing (404) is cached for the session; re-check once a minute
+let mapProbeAt = (() => { try { return Number(sessionStorage.getItem(MAP_PROBE_KEY)) || 0; } catch { return 0; } })();
+if (supabaseConfigured && mapProbeAt && Date.now() - mapProbeAt < MAP_REPROBE_MS) mapMode = 'legacy-debug';
+/** Something hinted that migration-v2 is live (e.g. a trigger broadcast): probe map_echoes on the next poll. */
+export function hintMigrationLive() { if (mapMode !== 'map_echoes') mapProbeAt = 0; }
 const MINE_KEY = 'echolocation.mine';
 
 function readMine() { try { return JSON.parse(localStorage.getItem(MINE_KEY)) || {}; } catch { return {}; } }
@@ -480,21 +638,50 @@ export function isMine(id) { return Boolean(readMine()[id]); }
 /** Ready supabase-js client (or null when the backend is unavailable). Used by the map feed for Realtime. */
 export async function supabaseClient() {
   if (supabaseDown) return null;
-  try { await sbReady(); return sbClient.getClient(); } catch { return null; }
+  try { return await sbReady(); } catch { return null; }       // init() resolves to the supabase-js client
 }
 
+/** "Blur my spot" before migration-v2: drop_echo has no blurred column yet, so the choice rides in the caption. */
+export const BLUR_MARKER = '[[blur]]';
+export const withBlurMarker = (c) => {
+  const t = String(c || '').replace(BLUR_MARKER, '').trim();
+  return t ? `${t.slice(0, 120)} ${BLUR_MARKER}` : BLUR_MARKER;
+};
+export const hasBlurMarker = (c) => typeof c === 'string' && c.includes(BLUR_MARKER);
+export const stripBlurMarker = (c) => (typeof c === 'string' ? c.replace(BLUR_MARKER, '').trim() || null : c);
+
 const inBox = (b, lat, lng) => lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng;
-function fuzzRow(r, fuzz = 'client') {
+/**
+ * One map record. EXACT pin (radius_m 0) unless the echo was dropped with "Blur my spot".
+ *   server : map_echoes pin from echoes-client-v2 (camelCase; the server already blurred it if needed)
+ *   client : exact row (debug_echoes / nearby_echoes / local); blurred ones get the 30–60 m glow from js/fuzz.js
+ * blurred is known from the v2 column, the pre-v2 caption marker, or (local) the stored flag. When it can't be
+ * known (nearby_echoes before v2 has neither) we blur, so a private choice is never shown as an exact pin.
+ */
+function mapRecord(r, fuzz = 'client') {
+  if (fuzz === 'server') {
+    const radius = Number(r.radiusM ?? r.radius_m) || 0;
+    return {
+      id: r.id, lat: r.lat, lng: r.lng, radius_m: radius, blurred: Boolean(r.blurred) || radius > 0,
+      resonance_count: r.resonanceCount ?? r.resonance_count ?? 0, heat: r.heat ?? null,
+      created_at: r.createdAt ?? r.created_at ? new Date(r.createdAt ?? r.created_at).toISOString() : null,
+      expires_at: r.expiresAt ?? r.expires_at ? new Date(r.expiresAt ?? r.expires_at).toISOString() : null,
+      place_label: r.placeLabel ?? r.place_label ?? null, fuzz: 'server', mine: isMine(r.id),
+    };
+  }
   const lat = r.echo_lat ?? r.lat, lng = r.echo_lng ?? r.lng;
-  const f = fuzz === 'server' ? { lat, lng, radiusM: r.radius_m } : fuzzPoint(r.id, lat, lng);
+  const blurKnown = 'blurred' in r || 'caption' in r;
+  const blurred = Boolean(r.blurred) || hasBlurMarker(r.caption) || !blurKnown;
+  const f = blurred ? fuzzPoint(r.id, lat, lng) : { lat, lng, radiusM: 0 };
   return {
-    id: r.id, lat: f.lat, lng: f.lng, radius_m: f.radiusM,
-    resonance_count: r.resonance_count ?? 0,
+    id: r.id, lat: f.lat, lng: f.lng, radius_m: f.radiusM, blurred,
+    resonance_count: r.resonance_count ?? 0, heat: r.heat ?? null,
     created_at: r.created_at ? new Date(r.created_at).toISOString() : null,
     expires_at: r.expires_at ? new Date(r.expires_at).toISOString() : null,
-    fuzz, mine: isMine(r.id),
+    place_label: r.place_label ?? null, fuzz: blurred ? 'client' : 'none', mine: isMine(r.id),
   };
 }
+export { mapRecord };
 
 /** Fuzzed echoes inside a viewport { minLat, minLng, maxLat, maxLng } (+ local-only ones). */
 export async function mapEchoes(bounds) {
@@ -502,19 +689,24 @@ export async function mapEchoes(bounds) {
   const now = Date.now();
   const local = (await localBackend.listAllEchoes())
     .filter((e) => !isExpired(e, now) && inBox(b, e.lat, e.lng))
-    .map((e) => ({ ...fuzzRow(e), source: 'local', mine: true }));
+    .map((e) => ({ ...mapRecord(e), source: 'local', mine: true }));
+  for (const q of await listOutbox()) {
+    if (inBox(b, q.lat, q.lng)) local.push({ ...mapRecord(q), source: 'queued', queued: true, mine: true });
+  }
   const remote = await withFallback(async () => {
-    const tryNew = mapMode === 'map_echoes' || mapMode === null || now - mapProbeAt > MAP_REPROBE_MS;
+    const tryNew = mapMode === 'map_echoes' || (mapMode === null && !mapProbeAt) || now - mapProbeAt > MAP_REPROBE_MS;
     if (tryNew) {
       mapProbeAt = now;
       try {
         const rows = await sb(() => sbClient.mapEchoes(b));
         mapMode = 'map_echoes';
-        return rows.map((r) => ({ ...fuzzRow(r, 'server'), source: 'supabase' }));
+        try { sessionStorage.removeItem(MAP_PROBE_KEY); } catch { /* ignore */ }
+        return rows.map((r) => ({ ...mapRecord(r, 'server'), source: 'supabase' }));
       } catch (e) {
         // function not there yet (migration not run) -> legacy path; anything else is a real error
-        if (!(e instanceof SupabaseError) || !['SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
+        if (!(e instanceof SupabaseError) || !['V2_MISSING', 'SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
         if (mapMode === 'map_echoes' || mapMode === null) mapMode = 'legacy-debug';
+        try { sessionStorage.setItem(MAP_PROBE_KEY, String(now)); } catch { /* ignore */ }  // don't re-404 on reload
       }
     }
     const lat = (b.minLat + b.maxLat) / 2, lng = (b.minLng + b.maxLng) / 2;
@@ -523,21 +715,24 @@ export async function mapEchoes(bounds) {
       try {
         const rows = await sb(() => sbClient.debugEchoes({ lat, lng, radiusM }));
         mapMode = 'legacy-debug';
-        return rows.map((r) => ({ ...fuzzRow(r), source: 'supabase' }));
+        return rows.map((r) => ({ ...mapRecord(r), source: 'supabase' }));
       } catch (e) {
         if (!(e instanceof SupabaseError) || !['SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
         mapMode = 'legacy-nearby';                                   // debug_echoes revoked
       }
     }
     const rows = await sb(() => sbClient.nearbyEchoes({ lat, lng, radiusM: Math.min(500, radiusM) }));
-    return rows.map((r) => ({ ...fuzzRow(r), source: 'supabase' }));
+    return rows.map((r) => ({ ...mapRecord(r), source: 'supabase' }));
   }, () => { mapMode = 'local'; return []; });
   return [...remote, ...local];
 }
 
 /** Take back an echo this device dropped (Supabase retract_echo, or delete the local copy). */
 export async function retractEcho(id) {
-  if (await isLocalId(id)) {
+  if (String(id).startsWith('q-')) {                                   // still in the outbox: just cancel the upload
+    const db = await openDb(); const tx = db.transaction('outbox', 'readwrite');
+    tx.objectStore('outbox').delete(id); await txDone(tx); outboxChanged();
+  } else if (await isLocalId(id)) {
     const db = await openDb();
     const tx = db.transaction(['echoes', 'audio'], 'readwrite');
     tx.objectStore('echoes').delete(id); tx.objectStore('audio').delete(id);
