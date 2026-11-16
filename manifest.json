@@ -2,9 +2,9 @@
   "name": "Echolocation",
   "short_name": "Echolocation",
   "description": "Drop short voice Echoes where you stand. Everyone sees the glow; only those who walk there can hear it.",
-  "id": "./",
-  "start_url": "./",
-  "scope": "./",
+  "id": "/VoiceSpace/",
+  "start_url": "/VoiceSpace/",
+  "scope": "/VoiceSpace/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#050608",
@@ -14,6 +14,24 @@
     "music"
   ],
   "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
     {
       "src": "icons/icon.svg",
       "sizes": "any",
@@ -26,5 +44,10 @@
       "type": "image/svg+xml",
       "purpose": "maskable"
     }
-  ]
+  ],
+  "display_override": [
+    "standalone"
+  ],
+  "lang": "en",
+  "dir": "ltr"
 }

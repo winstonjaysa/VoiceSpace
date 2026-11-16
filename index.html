@@ -10,10 +10,13 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Echolocation">
+  <meta name="application-name" content="Echolocation">
+  <meta name="format-detection" content="telephone=no">
   <title>Echolocation</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
-  <link rel="apple-touch-icon" href="icons/icon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
   <link rel="preconnect" href="https://rsms.me">
   <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
   <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
@@ -39,6 +42,7 @@
       <button class="gps-pill glass" data-gps-pill data-q="off" aria-label="GPS accuracy: location off. Tap to turn on.">
         <i aria-hidden="true"></i><span data-gps-text>GPS off</span>
       </button>
+      <button class="install-pill glass" data-install hidden aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span>Install app</span></button>
       <button class="outbox-pill glass" data-outbox hidden aria-live="polite">
         <i aria-hidden="true"></i><span data-outbox-text>Queued, will upload</span>
       </button>
@@ -63,6 +67,17 @@
   <button class="recenter glass" data-recenter hidden aria-label="Re-center the map on me and follow">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 18-7-4-7 4z"/></svg><span>Re-center</span>
   </button>
+  <section class="ios-hint glass" data-ios-hint hidden role="dialog" aria-labelledby="ios-hint-title">
+    <div class="grab" aria-hidden="true"></div>
+    <header class="card-head"><div class="card-title"><span class="eyebrow">Install on iPhone</span><strong id="ios-hint-title">Add Echolocation to your Home Screen</strong></div>
+      <button class="icon-btn" data-ios-hint-close aria-label="Close install hint"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+    <ol class="ios-steps">
+      <li><span class="ios-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12M8 7l4-4 4 4M6 11H5v10h14V11h-1"/></svg></span>Tap <strong>Share</strong> in Safari’s toolbar</li>
+      <li><span class="ios-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M12 8v8M8 12h8"/></svg></span>Choose <strong>Add to Home Screen</strong></li>
+      <li><span class="ios-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></span>Open it from your Home Screen, full screen with no browser bars</li>
+    </ol>
+    <p class="v2-hint" data-ios-other hidden>Open this page in Safari first; other iPhone browsers can’t add apps to the Home Screen.</p>
+  </section>
   <section class="trailwalk glass" data-trailwalk hidden aria-live="polite" aria-label="Trail walk"></section>
   <section class="sheet glass" id="card" data-card hidden aria-live="polite" aria-label="Echo details"></section>
   <section class="sheet glass about" id="about" data-about hidden role="dialog" aria-modal="false" aria-labelledby="about-title"></section>

@@ -7,6 +7,7 @@ import { createMapFeed } from './map-feed.js';
 import { mountRecordScreen } from './record.js';
 import { openHunt, fmtDist } from './listen.js';
 import { APP_VERSION, APP_BUILD, SW_CACHE } from './config.js';
+import { onInstallChange, promptInstall } from './pwa.js';
 import { canReplyHere, loadThread, startTrail, createTrailWalk, trailsNearMe } from './v2/index.js';
 
 const $ = (s) => document.querySelector(s);
@@ -16,7 +17,7 @@ const els = {
   live: $('[data-live]'), liveText: $('[data-live-text]'), toast: $('[data-toast]'),
   fab: $('[data-record]'), listenBtn: $('[data-listen]'), locate: $('[data-locate]'),
   gps: $('[data-gps-pill]'), gpsText: $('[data-gps-text]'), outbox: $('[data-outbox]'), outboxText: $('[data-outbox-text]'),
-  recenter: $('[data-recenter]'), trailwalk: $('[data-trailwalk]'), about: $('[data-about]'), aboutOpen: $('[data-about-open]'), skeleton: $('[data-skeleton]'),
+  recenter: $('[data-recenter]'), install: $('[data-install]'), iosHint: $('[data-ios-hint]'), trailwalk: $('[data-trailwalk]'), about: $('[data-about]'), aboutOpen: $('[data-about-open]'), skeleton: $('[data-skeleton]'),
 };
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const params = new URLSearchParams(location.search);
@@ -167,7 +168,7 @@ function updateLive(st = feed?.status()) {
 
 // ------------------------------------------------------------------ echo card
 function closeCard() {
-  cardId = null; els.card.classList.remove('open');
+  cardId = null; els.card.dataset.shape = ''; els.card.classList.remove('open');
   setTimeout(() => { if (!cardId) els.card.hidden = true; }, reducedMotion ? 0 : 280);
 }
 function renderCard(id) {
@@ -184,7 +185,25 @@ function renderCard(id) {
     : blurred ? `Blurred by its author: the spot is somewhere inside the ${Math.round(blurR(e))} m glow${place}. Walk there and listen for it.`
       : `Pinned exactly here${place}. Walk to the pin and listen.`;
   const lifeFrac = Math.max(0, Math.min(1, (Date.parse(e.expires_at) - Date.now()) / (24 * 3600e3)));
-  els.card.dataset.id = id;
+  // Same echo already shown: patch text in place so a tap in progress (or an open thread) survives GPS/feed updates.
+  const shape = `${id}|${queued}|${Boolean(e.mine)}|${v2On()}|${blurred}`;
+  if (els.card.dataset.shape === shape && els.card.querySelector('.card-head')) {
+    const set = (sel, v, attr) => { const n = els.card.querySelector(sel); if (n && (attr ? n.getAttribute(attr) : n.innerHTML) !== v) attr ? n.setAttribute(attr, v) : (n.innerHTML = v); };
+    set('.card-title .eyebrow', `${e.mine ? 'Your echo' : 'Echo'} · ${queued ? '<span class="tag-queued">Queued, will upload</span>' : heatWord(res)}${blurred ? ' · Blurred' : ''}`);
+    set('.card-title strong', where);
+    set('[data-stat="age"]', esc(ago(e.created_at))); set('[data-stat="left"]', esc(left(e.expires_at)));
+    set('[data-stat="res"]', String(res)); set('[data-stat="dist"]', d == null ? '—' : (blurred ? '~' : '') + fmtDist(d));
+    set('.life i', `transform:scaleX(${lifeFrac.toFixed(3)})`, 'style');
+    set('.card-note', note);
+    const glyph = els.card.querySelector('.card-glyph'); if (glyph) glyph.dataset.heat = heatWord(res).toLowerCase();
+    const row = els.card.querySelector('.v2-row');
+    if (row && !queued) {
+      const html = replyRow(e);
+      if (row.dataset.src !== html) { const t = document.createElement('template'); t.innerHTML = html.trim(); t.content.firstChild.dataset.src = html; row.replaceWith(t.content.firstChild); }
+    }
+    return;
+  }
+  els.card.dataset.id = id; els.card.dataset.shape = shape;
   els.card.innerHTML = `
     <div class="grab" aria-hidden="true"></div>
     <header class="card-head">
@@ -539,6 +558,23 @@ async function boot() {
   if (location.hash === '#record') { history.replaceState(null, '', location.pathname + location.search); openRecord({ autoStart: false }); }
 }
 boot();
+
+// ------------------------------------------------------------------ install as an app
+let installMode = 'none';
+onInstallChange(({ mode }) => {
+  installMode = mode;
+  els.install.hidden = !(mode === 'prompt' || mode === 'ios' || mode === 'ios-other');
+  if (mode === 'installed') els.iosHint.hidden = true;
+});
+els.install.addEventListener('click', async () => {
+  if (installMode === 'prompt') { const r = await promptInstall(); if (r === 'accepted') toast('Installed. Open Echolocation from your home screen.'); }
+  else if (installMode === 'ios' || installMode === 'ios-other') {
+    els.iosHint.querySelector('[data-ios-other]').hidden = installMode !== 'ios-other';
+    els.iosHint.hidden = false; requestAnimationFrame(() => els.iosHint.classList.add('open'));
+    els.iosHint.querySelector('[data-ios-hint-close]').focus();
+  }
+});
+els.iosHint.addEventListener('click', (ev) => { if (ev.target.closest('[data-ios-hint-close]')) { els.iosHint.classList.remove('open'); els.iosHint.hidden = true; els.install.focus(); } });
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
