@@ -4,6 +4,7 @@
 // when standing still outdoors. Optional reverse geocode for a human place label (OpenStreetMap: Nominatim, Photon fallback).
 // Origin: Cooker's /home/box/shared/echolocation/v2/cooker/precise-fix.js (2026-11-15). raptor: placeLabel() moved
 // off Mapbox (no token in the repo) to Nominatim with a Photon fallback; no API key needed for either.
+// raptor 2026-11-15: 4 s single-reading fallback (lowConfidence) for still phones that report only once.
 // Usage: const fix = await preciseFix({ onProgress: p => pill.textContent = `GPS ±${p.accuracy} m` });
 
 const R = 6371008.8, rad = d => d * Math.PI / 180;
@@ -33,26 +34,44 @@ export function combineFixes(fixes, { maxAccuracyM = 30, outlierK = 2.5 } = {}) 
   return c;
 }
 
-/** Collects fixes for up to windowMs; resolves early once targetM is reached with >= minSamples. */
-export function preciseFix({ windowMs = 8000, targetM = 6, minSamples = 3, maxAccuracyM = 30, onProgress } = {}) {
+/** Collects fixes for up to windowMs; resolves early once targetM is reached with >= minSamples.
+ *  Still phones (indoors) often report ONE reading and then go quiet, or only a cached one. So after fallbackMs
+ *  (default 4 s) with nothing combinable we resolve with the best single reading we have (fresh, cached, or the
+ *  caller's `seed`, e.g. the app's live fix), flagged lowConfidence: true. Callers keep refining from their own watch.
+ *  Result: { lat, lng, accuracy, samples, at, lowConfidence?, single? } */
+export function preciseFix({ windowMs = 8000, targetM = 6, minSamples = 3, maxAccuracyM = 30, fallbackMs = 4000,
+  seed = null, maxSeedAgeMs = 120000, onProgress } = {}) {
   return new Promise((resolve, reject) => {
     if (!('geolocation' in navigator)) return reject(new Error('no-geolocation'));
     const fixes = [], started = Date.now();
-    let done = false, last = null;
-    const finish = () => {
-      if (done) return; done = true;
-      navigator.geolocation.clearWatch(id); clearTimeout(timer);
-      const c = combineFixes(fixes, { maxAccuracyM });
-      c ? resolve({ ...c, at: Date.now() }) : reject(new Error(last ? `gps-too-weak:${Math.round(last.accuracy)}` : 'gps-timeout'));
+    let done = false, last = null, cached = null, id = null;
+    const seedOk = seed && Number.isFinite(seed.lat) && Number.isFinite(seed.lng)
+      && (!seed.ts || started - seed.ts < maxSeedAgeMs) ? { ...seed, accuracy: seed.accuracy || 50 } : null;
+    const end = () => { done = true; if (id != null) navigator.geolocation.clearWatch(id); clearTimeout(timer); clearTimeout(fbTimer); };
+    const single = () => {
+      const s1 = [last, cached, seedOk].filter(Boolean).sort((a, b) => a.accuracy - b.accuracy)[0];
+      return s1 ? { lat: s1.lat, lng: s1.lng, accuracy: Math.max(3, s1.accuracy), samples: 1, single: true, lowConfidence: true, at: Date.now() } : null;
     };
-    const id = navigator.geolocation.watchPosition(p => {
-      if (p.timestamp < started - 1000) return;                 // ignore cached fixes
-      const c = p.coords; last = { lat: c.latitude, lng: c.longitude, accuracy: c.accuracy, ts: p.timestamp };
-      fixes.push(last);
+    const finish = () => {
+      if (done) return; end();
+      const c = combineFixes(fixes, { maxAccuracyM });
+      if (c) return resolve({ ...c, at: Date.now(), lowConfidence: c.samples < minSamples && c.accuracy > targetM });
+      const s1 = single();
+      s1 ? resolve(s1) : reject(new Error(last ? `gps-too-weak:${Math.round(last.accuracy)}` : 'gps-timeout'));
+    };
+    const fbTimer = setTimeout(() => {                         // one quiet reading: don't keep the user waiting
+      if (done || combineFixes(fixes, { maxAccuracyM })?.samples >= 2) return;
+      const s1 = single(); if (!s1) return;
+      end(); resolve(s1);
+    }, fallbackMs);
+    id = navigator.geolocation.watchPosition(p => {
+      const c = p.coords; const f = { lat: c.latitude, lng: c.longitude, accuracy: c.accuracy, ts: p.timestamp };
+      if (p.timestamp < started - 1000) { cached = f; return; }  // cached fix: fallback only, never averaged
+      last = f; fixes.push(last);
       const cur = combineFixes(fixes, { maxAccuracyM });
       onProgress?.({ accuracy: Math.round(cur?.accuracy ?? c.accuracy), samples: cur?.samples ?? 0 });
       if (cur && cur.samples >= minSamples && cur.accuracy <= targetM) finish();
-    }, e => { if (e.code === 1) { done = true; clearTimeout(timer); navigator.geolocation.clearWatch(id); reject(new Error('location-denied')); } },
+    }, e => { if (e.code === 1) { end(); reject(new Error('location-denied')); } },
     { enableHighAccuracy: true, maximumAge: 0, timeout: windowMs + 5000 });
     const timer = setTimeout(finish, windowMs);
   });

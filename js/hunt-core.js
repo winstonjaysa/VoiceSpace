@@ -6,8 +6,14 @@
 //   button.onclick = () => hunt.start();   // MUST be called from a user gesture (iOS audio + compass permission)
 //
 // See README.md for the source adapter contract and tuning constants.
+//
+// v2 (night crawler): options.fusion (default true) fuses GPS with pedestrian dead reckoning
+// (DeviceMotion step detection + compass heading, 2-D Kalman, see fusion.js). Same public API as v1;
+// new: hunt.seedFix(fix) (accepts any teammate's precise-fix result), injectStep(), injectMotion(),
+// state.position.source, state.fusion, state.location (coarse / Precise Location off detection).
 
 import * as M from './hunt-math.js';
+import * as F from './fusion.js';
 
 export const DEFAULTS = Object.freeze({
   unlockRadiusM: 15,        // enter tune-in at <= this distance (GPS is only ~5–15 m good, don't go lower)
@@ -30,6 +36,14 @@ export const DEFAULTS = Object.freeze({
   useDeviceGeolocation: true, // false => feed positions with hunt.injectPosition() (desk mode / tests)
   useDeviceCompass: true,     // false => feed heading with hunt.injectHeading()
   stateThrottleMs: 80,
+  fusion: true,               // GPS + step dead reckoning (fusion.js). false => v1 1-state Kalman.
+  fusionOptions: {},          // overrides for fusion.js FUSION_DEFAULTS (stepLengthM, headingSigmaDeg, ...)
+  useDeviceMotion: true,      // false => feed steps with hunt.injectStep() / hunt.injectMotion() (tests)
+  stepDetector: {},           // overrides for fusion.js createStepDetector()
+  coarseCheck: true,          // detect approximate location (iOS Precise Location off) and expose state.location
+  firstFixTimeoutMs: 4000,    // no fix from watchPosition by then => getCurrentPosition() accepting a cached reading
+  fallbackMaxAgeMs: 120000,   // ...up to this old (a stationary phone indoors often never sends a fresh one)
+  initialFix: null,           // optional last known reading (GeolocationPosition / precise-fix result) to start from
 });
 
 const now = () => Date.now();
@@ -46,6 +60,10 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
   let ctx = null, audio = null;                 // AudioContext + shared nodes
   let geoWatch = null, wakeLock = null;
   const gps = M.createGpsFilter({ q: o.gpsProcessNoise, maxAccuracyM: o.maxAccuracyM });
+  const fuser = o.fusion ? F.createFusion({ maxAccuracyM: o.maxAccuracyM, ...o.fusionOptions }) : null;
+  const stepDet = F.createStepDetector(o.stepDetector);
+  let firstFixTimer = null, lastRawFix = null;
+  let motionPermission = 'unknown', motionAt = 0, recentFixes = [], location = { coarse: false, level: 'unknown', reason: '' };
   let pos = null;                               // { lat, lng, accuracy, altitude, lowConfidence, at, rawAccuracy }
   let gpsCourse = null;                         // degrees, from coords.heading when moving
   let heading = null, pitch = null, headingSource = 'none', headingAt = 0, compassAccuracy = null;
@@ -63,6 +81,8 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
     orientation: typeof window !== 'undefined' && ('DeviceOrientationEvent' in window),
     orientationNeedsPermission: typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function',
     wakeLock: typeof navigator !== 'undefined' && 'wakeLock' in navigator,
+    motion: typeof window !== 'undefined' && ('DeviceMotionEvent' in window),
+    motionNeedsPermission: typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function',
     hrtf: true,
   };
 
@@ -72,7 +92,9 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
     const rel = t && heading != null ? M.relativeAngle(t.bearingDeg, heading) : null;
     return {
       status, error, needsTap,
-      position: pos && { lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy, rawAccuracy: pos.rawAccuracy, altitude: pos.altitude, lowConfidence: pos.lowConfidence },
+      position: pos && { lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy, rawAccuracy: pos.rawAccuracy, altitude: pos.altitude, lowConfidence: pos.lowConfidence, source: pos.source || 'gps' },
+      fusion: fuser ? { enabled: true, motionPermission, motionLive: now() - motionAt < 3000, steps: stepDet.count, stepLengthM: fuser.stepLengthM } : { enabled: false },
+      location: { ...location, help: location.coarse ? F.preciseLocationHelp(typeof navigator !== 'undefined' ? navigator.userAgent : '') : null },
       heading, pitch, headingSource, compassPermission, compassAccuracy,
       echoesCount: ranked.length, pollError, pingCount,
       target: t && {
@@ -225,6 +247,37 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
     window.removeEventListener('deviceorientation', onOrientation);
     clearTimeout(compassTimer);
   }
+  // ------------------------------------------------------------ motion (step detection for dead reckoning)
+  function requestMotionPermission() {
+    // iOS 13+: MUST be called synchronously inside the same user gesture as the orientation request.
+    if (!fuser || !o.useDeviceMotion) return Promise.resolve('skipped');
+    if (caps.motionNeedsPermission) {
+      try { return DeviceMotionEvent.requestPermission().catch(() => 'denied'); } catch { return Promise.resolve('denied'); }
+    }
+    return Promise.resolve(caps.motion ? 'granted' : 'unsupported');
+  }
+  function stepHeading() {
+    if (heading != null && now() - headingAt < 2500) return heading;   // compass (or recent GPS course)
+    return null;
+  }
+  function onStep(t = now()) {
+    if (!fuser) return;
+    const r = fuser.step(t, stepHeading());
+    if (r && r.propagated && pos) {
+      pos = { ...pos, lat: r.lat, lng: r.lng, accuracy: r.accuracy, source: 'fused', at: t };
+      recompute();
+    }
+  }
+  function onMotionSample(mag, t = now()) {
+    motionAt = t;
+    if (stepDet.push(t, mag)) onStep(t);
+    else if (fuser && t - lastAlive > 1000) { lastAlive = t; fuser.motionAlive(t); }
+  }
+  let lastAlive = 0;
+  function onDeviceMotion(e) { onMotionSample(F.motionMagnitude(e)); }
+  function attachMotion() { window.addEventListener('devicemotion', onDeviceMotion); }
+  function detachMotion() { window.removeEventListener('devicemotion', onDeviceMotion); }
+
   // If the compass is silent (desktop, denied, broken), use GPS course over ground while walking.
   function maybeUseGpsCourse() {
     if (gpsCourse == null) return;
@@ -237,10 +290,23 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
   function onFix(p, raw = false) {
     const c = p.coords;
     let r;
-    if (raw) { r = { lat: c.latitude, lng: c.longitude, accuracy: c.accuracy ?? 5, accepted: true, lowConfidence: (c.accuracy ?? 5) > o.maxAccuracyM }; gps.reset(); gps.process(c.latitude, c.longitude, c.accuracy ?? 5, p.timestamp || now()); }
-    else r = gps.process(c.latitude, c.longitude, c.accuracy, p.timestamp || now());
-    if (!r.accepted) { if (pos) { pos.lowConfidence = true; pos.rawAccuracy = c.accuracy; } emit(); return; }
-    pos = { lat: r.lat, lng: r.lng, accuracy: r.accuracy, rawAccuracy: c.accuracy, altitude: c.altitude ?? null, lowConfidence: r.lowConfidence, at: now() };
+    const ts = now(); // one clock for GPS + steps (p.timestamp can be stale/cached on iOS)
+    lastRawFix = p; clearTimeout(firstFixTimer);
+    if (o.coarseCheck) {
+      recentFixes.push({ lat: c.latitude, lng: c.longitude, accuracy: c.accuracy ?? 999 }); if (recentFixes.length > 6) recentFixes.shift();
+      const prev = location.coarse; location = F.detectCoarse(recentFixes);
+      if (location.coarse !== prev) emit(true);
+    }
+    if (raw) {
+      r = { lat: c.latitude, lng: c.longitude, accuracy: c.accuracy ?? 5, accepted: true, lowConfidence: (c.accuracy ?? 5) > o.maxAccuracyM };
+      gps.reset(); gps.process(c.latitude, c.longitude, c.accuracy ?? 5, ts);
+      if (fuser) { fuser.reset(); fuser.gps({ lat: c.latitude, lng: c.longitude, accuracy: c.accuracy ?? 5, timestamp: ts }); }
+    } else if (fuser) {
+      r = fuser.gps({ lat: c.latitude, lng: c.longitude, accuracy: c.accuracy, timestamp: ts });
+      if (r && r.lowConfidence == null) r.lowConfidence = (c.accuracy ?? 999) > o.maxAccuracyM;
+    } else r = gps.process(c.latitude, c.longitude, c.accuracy, ts);
+    if (!r || !r.accepted) { if (pos) { pos.lowConfidence = true; pos.rawAccuracy = c.accuracy; } emit(); return; }
+    pos = { lat: r.lat, lng: r.lng, accuracy: r.accuracy, rawAccuracy: c.accuracy, altitude: c.altitude ?? pos?.altitude ?? null, lowConfidence: !!r.lowConfidence, at: ts, source: fuser ? 'fused' : 'gps' };
     if (Number.isFinite(c.heading) && (c.speed ?? 0) > 0.7) { gpsCourse = c.heading; maybeUseGpsCourse(); }
     if (status === 'locating') setStatus('searching');
     recompute();
@@ -248,7 +314,22 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
   }
   function onGeoError(err) {
     error = err.code === 1 ? 'location-denied' : err.code === 3 ? 'location-timeout' : 'location-unavailable';
-    if (err.code === 1) setStatus('error'); else emit(true);
+    if (err.code === 1) setStatus('error');
+    else { if (!pos) firstFixFallback(); emit(true); }
+  }
+  // Single-reading fix (Cooker's bug): watchPosition with maximumAge 0 may never fire on a stationary phone
+  // indoors (the OS already handed its one reading to another watcher, e.g. app.js's map). After
+  // firstFixTimeoutMs, accept any cached reading; flagged lowConfidence when older than 10 s.
+  function firstFixFallback() {
+    if (!running || pos || !o.useDeviceGeolocation || !caps.geolocation) return;
+    if (lastRawFix) { onFix(lastRawFix); return; }
+    try {
+      navigator.geolocation.getCurrentPosition(p => {
+        if (!running || pos) return;
+        onFix(p);
+        if (pos && p.timestamp && Date.now() - p.timestamp > 10000) { pos.lowConfidence = true; emit(true); }
+      }, () => {}, { enableHighAccuracy: false, maximumAge: o.fallbackMaxAgeMs, timeout: 10000 });
+    } catch {}
   }
 
   // ------------------------------------------------------------ polling the source
@@ -416,6 +497,7 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
     let audioP;
     try { audioP = ensureAudio(); } catch (e) { running = false; error = e.message; setStatus('error'); throw e; }
     const permP = requestCompassPermission();
+    const motionP = requestMotionPermission();     // same gesture, same tick (iOS)
     // -------------------------------------------------------------------------------
     document.addEventListener('visibilitychange', onVisibility);
     hidden = document.visibilityState !== 'visible';
@@ -423,6 +505,8 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
     try { await audioP; } catch {}
     needsTap = ctx.state !== 'running';
     compassPermission = await permP;
+    motionPermission = await motionP;
+    if (fuser && o.useDeviceMotion && motionPermission !== 'unsupported' && motionPermission !== 'skipped') attachMotion();
     // Attach even if the permission API said no: some Chromium builds expose requestPermission() but still
     // deliver events. If nothing arrives within noCompassTimeoutMs we fall back (GPS course / distance-only).
     if (o.useDeviceCompass && compassPermission !== 'unsupported') attachCompass();
@@ -431,7 +515,10 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
     if (o.useDeviceGeolocation) {
       if (!caps.geolocation) { error = 'no-geolocation'; setStatus('error'); return; }
       geoWatch = navigator.geolocation.watchPosition(p => onFix(p), onGeoError, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+      clearTimeout(firstFixTimer);
+      firstFixTimer = setTimeout(firstFixFallback, o.firstFixTimeoutMs);
     }
+    if (o.initialFix && !pos) seedFix(o.initialFix);
     pollTimer = setInterval(maybePoll, 1000);
     pingTick();
     emit(true);
@@ -442,7 +529,7 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
     running = false;
     if (geoWatch != null) navigator.geolocation.clearWatch(geoWatch);
     geoWatch = null;
-    detachCompass(); clearInterval(pollTimer); clearTimeout(pingTimer); clearTimeout(emitTimer);
+    detachCompass(); detachMotion(); clearInterval(pollTimer); clearTimeout(firstFixTimer); clearTimeout(pingTimer); clearTimeout(emitTimer);
     document.removeEventListener('visibilitychange', onVisibility);
     if (tune) exitTune();
     wakeLock?.release().catch(() => {}); wakeLock = null;
@@ -479,8 +566,22 @@ export function createHunt({ source, onState = () => {}, onPing = () => {}, opti
     onOrientationChanged();
   }
 
+  /** Seed/correct the position with a precise-fix result (Cooker's or trax's preciseFix(), or a GeolocationPosition). */
+  function seedFix(fix) {
+    const f = F.normalizeFix(fix); if (!f) return false;
+    onFix({ coords: { latitude: f.lat, longitude: f.lng, accuracy: f.accuracy, altitude: f.altitude, heading: null, speed: null }, timestamp: f.timestamp });
+    return true;
+  }
+  /** Tests / desk mode: one step in the current heading (or headingDeg). */
+  function injectStep(headingDeg) {
+    if (headingDeg != null) { heading = M.normDeg(headingDeg); headingAt = now(); if (headingSource === 'none') headingSource = 'compass'; }
+    motionAt = now(); onStep(now());
+  }
+  /** Tests: feed one accelerometer magnitude sample (m/s^2) through the real step detector. */
+  function injectMotion(mag, t = now()) { onMotionSample(mag, t); }
+
   return {
-    start, stop, resonate, resumeAudio, injectPosition, injectHeading,
+    start, stop, resonate, resumeAudio, injectPosition, injectHeading, seedFix, injectStep, injectMotion,
     getState: snapshot,
     /** Current tune-in audio parameters (debug/tests). null when not playing. */
     debugAudio() {
