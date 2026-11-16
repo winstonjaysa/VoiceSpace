@@ -12,6 +12,7 @@ import { fuzzPoint } from './fuzz.js';
 
 const TOPIC = 'echo-map';
 const POLL_MS = 5000;
+const POLL_TIMEOUT_MS = 12000;    // per poll
 const GRACE_MS = 12000;           // keep an unconfirmed realtime echo this long before a poll may drop it
 const MAX_SPAN_DEG = 1.2;         // never ask for more than ~130 km of map at once
 
@@ -52,7 +53,9 @@ export function createMapFeed({ onChange = () => {}, onStatus = () => {}, onErro
     const b = bounds;
     inflight = (async () => {
       try {
-        const rows = await store.mapEchoes(b);
+        // a stalled request must never freeze the feed: give up after POLL_TIMEOUT_MS and poll again later
+        const rows = await Promise.race([store.mapEchoes(b),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('Timed out refreshing echoes')), POLL_TIMEOUT_MS))]);
         lastError = null; lastPollAt = Date.now();
         const ids = new Set(rows.map((r) => r.id));
         const now = Date.now();

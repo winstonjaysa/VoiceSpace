@@ -93,15 +93,23 @@ let dbPromise = null;
 function openDb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
+    // An old tab still holding v1 open blocks the v2 upgrade; don't hang the app on it.
+    const t = setTimeout(() => { dbPromise = null; reject(new Error('IndexedDB is busy (close other Echolocation tabs)')); }, 5000);
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onblocked = () => console.info('[echo-store] IndexedDB upgrade waiting for another tab to close');
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains('echoes')) db.createObjectStore('echoes', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('audio')) db.createObjectStore('audio', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('outbox')) db.createObjectStore('outbox', { keyPath: 'qid' });
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      clearTimeout(t);
+      const db = req.result;
+      db.onversionchange = () => { db.close(); dbPromise = null; };   // let a newer version of the app upgrade
+      resolve(db);
+    };
+    req.onerror = () => { clearTimeout(t); dbPromise = null; reject(req.error); };
   });
   return dbPromise;
 }
@@ -687,7 +695,7 @@ export { mapRecord };
 export async function mapEchoes(bounds) {
   const b = bounds;
   const now = Date.now();
-  const local = (await localBackend.listAllEchoes())
+  const local = (await localBackend.listAllEchoes().catch(() => []))
     .filter((e) => !isExpired(e, now) && inBox(b, e.lat, e.lng))
     .map((e) => ({ ...mapRecord(e), source: 'local', mine: true }));
   for (const q of await listOutbox()) {
