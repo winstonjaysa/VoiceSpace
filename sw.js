@@ -1,15 +1,18 @@
 // Simple service worker: precache the app shell, network-first for same-origin GETs (fresh deploys win),
 // cache fallback when offline. Cross-origin requests (map tiles, MapLibre, Supabase) are not touched.
-const VERSION = 'echolocation-v7.0-v2features';
+const VERSION = 'echolocation-v7.1-pwa';
 const SHELL = [
   './', './index.html', './manifest.json',
   './css/app.css', './css/record.css',
-  './js/app.js', './js/config.js', './js/map.js', './js/map-feed.js', './js/fuzz.js', './js/precise-fix.js', './js/echo-store.js', './js/echoes-client-v2.js', './js/fusion.js', './js/v2/index.js', './js/v2/geo.js', './js/v2/live-transcript.js', './js/v2/replies.js', './js/v2/capsule.js', './js/v2/trail-walk.js', './js/record.js', './js/listen.js', './js/hunt.js', './js/hunt-core.js', './js/hunt-math.js', './js/desk-sim.js', './js/debug.js', './debug.html',
-  './icons/icon.svg', './icons/icon-maskable.svg',
+  './js/app.js', './js/pwa.js', './js/config.js', './js/map.js', './js/map-feed.js', './js/fuzz.js', './js/precise-fix.js', './js/echo-store.js', './js/echoes-client-v2.js', './js/fusion.js', './js/v2/index.js', './js/v2/geo.js', './js/v2/live-transcript.js', './js/v2/replies.js', './js/v2/capsule.js', './js/v2/trail-walk.js', './js/record.js', './js/listen.js', './js/hunt.js', './js/hunt-core.js', './js/hunt-math.js', './js/desk-sim.js', './js/debug.js', './debug.html',
+  './icons/icon.svg', './icons/icon-maskable.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/apple-touch-icon.png', './icons/favicon-32.png',
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // Cache file by file: one missing asset must not block the offline shell.
+  e.waitUntil(caches.open(VERSION)
+    .then((c) => Promise.allSettled(SHELL.map((u) => fetch(u, { cache: 'reload' }).then((r) => (r.ok ? c.put(u, r) : null)))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -26,6 +29,6 @@ self.addEventListener('fetch', (e) => {
       if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
       return res;
     }).catch(() => caches.match(req, { ignoreSearch: true })
-      .then((hit) => hit || (req.mode === 'navigate' ? caches.match('./index.html') : Response.error()))),
+      .then((hit) => hit || (req.mode === 'navigate' ? caches.match('./index.html').then((h) => h || caches.match('./')) : Response.error()))),
   );
 });

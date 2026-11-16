@@ -145,3 +145,10 @@ same data. "Show my position" adds your location.
 
 v2 features switch on by themselves when `map_echoes` answers (no reload). No v2 RPC is called before then.
 Copied verbatim from trax (`/home/box/shared/echolocation/v2/trax/`); edit there, then copy again.
+
+## Install as an app (v4.1)
+
+- `manifest.json`: id / start_url / scope `/VoiceSpace/`, standalone, PNG icons 192, 512, 512 maskable (+ SVG); `apple-touch-icon.png` 180.
+- Android/desktop Chrome: an **Install app** pill appears (beforeinstallprompt). iPhone Safari: the pill opens a "Share → Add to Home Screen" hint. Both are hidden when running installed.
+- The service worker precaches the shell file by file and serves `index.html` for navigations when offline.
+- PNG icons are committed as base64 text in `icons/src/` (the repo is updated through a text-only API); `.github/workflows/pwa-icons.yml` decodes them into `icons/*.png`, checks SHA256SUMS, commits, and asks Pages to rebuild.
