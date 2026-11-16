@@ -1,5 +1,5 @@
 // Hidden debug map (/debug.html). Shows every echo from echo-store (EXACT positions: debug only) + the user's position.
-// v2: MapLibre GL JS + OpenFreeMap dark (free, no token). Each echo also shows its public fuzzy glow (dashed ring)
+// v2: MapLibre GL JS + OpenFreeMap dark (free, no token). Blurred echoes also show their public fuzzy glow (dashed ring)
 // as the main map draws it, so you can check the real spot always sits inside its glow.
 import * as store from './echo-store.js';
 import { STYLES } from './map.js';
@@ -48,7 +48,8 @@ function toGeoJSON(list) {
 
 // the public glow for each echo, as a 48-gon in degrees
 function toGlowGeoJSON(list) {
-  return { type: 'FeatureCollection', features: list.map((e) => {
+  // v3: echoes are exact pins on the public map; only "Blur my spot" ones get a public glow
+  return { type: 'FeatureCollection', features: list.filter((e) => e.blurred).map((e) => {
     const f = fuzzPoint(e.id, e.lat, e.lng);
     const ring = [];
     for (let i = 0; i <= 48; i++) {

@@ -21,7 +21,7 @@ export const fmtDist = (m) => (m >= 1000 ? `${(m / 1000).toFixed(m >= 10000 ? 0 
  * openHunt(root, { target, onClose, onState }) — MUST be called synchronously inside a tap (iOS audio + compass).
  * target: a map record { id, lat, lng (fuzzed), radius_m, ... } or null for "nearest echo".
  */
-export function openHunt(root, { target = null, onClose = () => {}, onState } = {}) {
+export function openHunt(root, { target = null, onClose = () => {}, onState, initialFix = null, onError = () => {} } = {}) {
   root.innerHTML = `
     <div class="hunt" data-hunt-overlay>
       <header class="hunt-top">
@@ -69,6 +69,8 @@ export function openHunt(root, { target = null, onClose = () => {}, onState } = 
       gnote.textContent = s.status === 'tuning' ? 'turn slowly until it clears' : s.target.relativeDeg != null ? 'pings speed up as you close in' : 'walk · pings speed up as you close in';
     } else guide.hidden = true;
     if (s.error === 'location-denied') foot.textContent = 'Location is off. Enable it to listen.';
+    else if (s.location?.coarse && s.location.help) foot.textContent = `${s.location.help.title}: ${s.location.help.steps.join(' ')}`;
+    else if (s.location?.level === 'weak') foot.textContent = 'GPS is weak here. Step outside for a better signal.';
     try { onState?.(s); } catch { /* host hook */ }
   };
 
@@ -79,10 +81,11 @@ export function openHunt(root, { target = null, onClose = () => {}, onState } = 
   $('[data-close]').addEventListener('click', close);
 
   // synchronous: startHunt does its gesture-bound work before its first await
-  startHunt($('[data-hunt]'), { store, onState: onHuntState, targetId: target?.id || null }).then((h) => {
+  startHunt($('[data-hunt]'), { store, onState: onHuntState, targetId: target?.id || null, options: { initialFix } }).then((h) => {
     if (closed) h.stop(); else hunt = h;
   }, (e) => {
-    console.error('[listen] hunt failed to start', e);
+    console.warn('[listen] hunt failed to start', e);
+    onError(e);
     foot.textContent = `Couldn't start listening: ${e.message || e}`;
   });
   return { close, get hunt() { return hunt; } };

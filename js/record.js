@@ -29,7 +29,7 @@ const TEMPLATE = `
     <div class="rec-logo" aria-hidden="true"><span></span><span></span><span></span><i></i></div>
     <p class="eyebrow">New echo</p>
     <h1>Leave your voice here</h1>
-    <p class="lede">Up to 30 seconds, pinned to where you stand. Everyone sees a soft glow on the map. Only people who walk here can hear it.</p>
+    <p class="lede">Up to 30 seconds, pinned exactly where you stand. Everyone sees the pin on the map. Only people who walk here can hear it.</p>
     <button class="btn primary big" data-enable>Enable mic &amp; location</button>
     <p class="err" data-gate-err role="alert"></p>
   </div>
@@ -50,7 +50,12 @@ const TEMPLATE = `
     <p class="hint" data-hint>Hold to record &middot; or tap to start, tap to stop</p>
 
     <div class="review" data-review hidden>
-      <audio controls preload="auto" data-audio></audio>
+      <audio controls preload="auto" data-audio aria-label="Your recording"></audio>
+      <label class="blur-toggle">
+        <input type="checkbox" role="switch" data-blur aria-describedby="blur-help">
+        <span class="switch" aria-hidden="true"></span>
+        <span class="blur-text"><strong>Blur my spot</strong><small id="blur-help">Show a 30–60 m glow instead of the exact pin</small></span>
+      </label>
       <div class="row">
         <button class="btn" data-rerecord>Re-record</button>
         <button class="btn primary" data-drop disabled>Waiting for GPS&hellip;</button>
@@ -61,8 +66,8 @@ const TEMPLATE = `
 
   <div class="rec-confirm" data-confirm hidden>
     <div class="ripple" aria-hidden="true"><span></span><span></span><span></span></div>
-    <p class="eyebrow">Dropped</p>
-    <h2>Your echo is out there</h2>
+    <p class="eyebrow" data-c-eyebrow>Dropped</p>
+    <h2 data-c-title>Your echo is out there</h2>
     <p class="lede" data-c-source></p>
     <dl>
       <dt>Near</dt><dd data-c-place></dd>
@@ -71,7 +76,7 @@ const TEMPLATE = `
       <dt>Heading</dt><dd data-c-heading></dd>
       <dt>Fades</dt><dd data-c-exp></dd>
     </dl>
-    <p class="muted small">It fades in 24 h unless listeners resonate with it. The map shows a 30–60 m glow, never this exact spot.</p>
+    <p class="muted small" data-c-note>It fades in 24 h unless listeners resonate with it.</p>
     <div class="row">
       <button class="btn" data-another>Record another</button>
       <button class="btn primary" data-see>See it on the map</button>
@@ -99,8 +104,8 @@ export function pickMimeType() {
   return ''; // let the browser choose
 }
 
-/** mountRecordScreen(root, { onClose, onDropped, autoStart }). autoStart: call it inside a tap to skip the gate. */
-export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => {}, autoStart = false } = {}) {
+/** mountRecordScreen(root, { onClose, onDropped, autoStart, onToast }). autoStart: call it inside a tap to skip the gate. */
+export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => {}, autoStart = false, onToast = () => {} } = {}) {
   root.innerHTML = TEMPLATE;
   const $ = (s) => root.querySelector(s);
   const el = {
@@ -109,7 +114,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     main: $('[data-main]'), timer: $('[data-timer]'), meter: $('[data-meter]'),
     rec: $('[data-rec]'), ring: $('[data-ring]'), hint: $('[data-hint]'),
     review: $('[data-review]'), audio: $('[data-audio]'), rerecord: $('[data-rerecord]'),
-    drop: $('[data-drop]'), warn: $('[data-warn]'),
+    drop: $('[data-drop]'), warn: $('[data-warn]'), blur: $('[data-blur]'),
     confirm: $('[data-confirm]'), another: $('[data-another]'), close: $('[data-close]'), see: $('[data-see]'),
   };
   let lastEcho = null, lastFix = null;
@@ -172,6 +177,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
       el.gateErr.textContent = err?.name === 'NotAllowedError'
         ? 'Microphone permission was denied. Allow it in your browser settings and try again.'
         : `Microphone unavailable: ${err?.message || err}`;
+      onToast(el.gateErr.textContent);
       return;
     }
 
@@ -366,17 +372,24 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     let fix = s.fix;
     s.locking = true; el.drop.textContent = 'Locking position\u2026';
     el.warn.textContent = 'Hold still for a few seconds while we pin the exact spot.';
+    // street label for the echo (stored as place_label after migration-v2); looked up in parallel with the lock
+    const labelP = navigator.onLine === false ? Promise.resolve(null)
+      : placeLabel({ lat: s.fix.lat, lng: s.fix.lng }).catch(() => null);
     try {
-      const p = await preciseFix({ windowMs: 8000, targetM: 6, minSamples: 3, maxAccuracyM: 30,
+      const p = await preciseFix({ windowMs: 8000, targetM: 6, minSamples: 3, maxAccuracyM: 30, fallbackMs: 4000,
+        seed: s.fix ? { lat: s.fix.lat, lng: s.fix.lng, accuracy: s.fix.accuracy, ts: s.fix.ts } : null,
         onProgress: (q) => { el.drop.textContent = `Locking \u00b1${q.accuracy} m \u00b7 ${q.samples} reading${q.samples === 1 ? '' : 's'}`; } });
       if (p && (!Number.isFinite(fix.accuracy) || p.accuracy <= fix.accuracy || p.samples >= 3)) {
-        fix = { lat: p.lat, lng: p.lng, accuracy: p.accuracy, altitude: s.fix.altitude, ts: p.at, samples: p.samples, precise: true };
+        fix = { lat: p.lat, lng: p.lng, accuracy: p.accuracy, altitude: s.fix.altitude, ts: p.at, samples: p.samples,
+          precise: !p.single, lowConfidence: Boolean(p.lowConfidence) };
       }
     } catch (e) { console.info('[record] precise lock unavailable, using live fix:', e.message); }
     s.locking = false;
     el.drop.textContent = 'Dropping\u2026';
+    const place = await Promise.race([labelP, new Promise((r) => setTimeout(() => r(null), 1500))]);
     try {
       const echo = await dropEcho({
+        blurred: el.blur.checked, placeLabel: place || null,
         blob: s.blob,
         mimeType: s.blob.type,
         durationMs: Math.round(s.durationMs),
@@ -387,7 +400,8 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
       lastFix = fix;
       showConfirmation(echo);
     } catch (err) {
-      el.warn.textContent = `Couldn't drop: ${err?.message || err}`;
+      el.warn.textContent = `Couldn't drop: ${err?.friendly || err?.message || err}`;
+      onToast(`Couldn’t drop: ${err?.friendly || err?.message || err}`);
     } finally {
       s.dropping = false; updateDropButton();
     }
@@ -397,17 +411,27 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     root.querySelector('[data-c-lat]').textContent = echo.lat.toFixed(5);
     root.querySelector('[data-c-lng]').textContent = echo.lng.toFixed(5);
     root.querySelector('[data-c-acc]').textContent = (echo.accuracy_m != null ? `\u00b1${Math.round(echo.accuracy_m)} m` : 'unknown')
-      + (lastFix?.precise ? ` \u00b7 locked from ${lastFix.samples} readings` : '');
+      + (lastFix?.precise ? ` \u00b7 locked from ${lastFix.samples} readings` : lastFix?.lowConfidence ? ' \u00b7 single reading (low confidence)' : '');
     const placeEl = root.querySelector('[data-c-place]');
-    placeEl.textContent = '\u2026';
-    placeLabel({ lat: echo.lat, lng: echo.lng }).then((l) => { placeEl.textContent = l || 'Unnamed spot'; });
+    if (echo.place_label) placeEl.textContent = echo.place_label;
+    else if (navigator.onLine === false) placeEl.textContent = 'Unnamed spot';
+    else { placeEl.textContent = '\u2026'; placeLabel({ lat: echo.lat, lng: echo.lng }).then((l) => { placeEl.textContent = l || 'Unnamed spot'; }).catch(() => { placeEl.textContent = 'Unnamed spot'; }); }
+    const q = Boolean(echo.queued);
+    root.querySelector('[data-c-eyebrow]').textContent = q ? 'Queued' : 'Dropped';
+    root.querySelector('[data-c-title]').textContent = q ? 'Queued, will upload' : 'Your echo is out there';
+    root.querySelector('[data-c-note]').textContent = (echo.blurred
+      ? 'Blurred: the map shows a 30\u201360 m glow around this spot, not the exact pin.'
+      : 'The map shows an exact pin here.') + ' It fades in 24 h unless listeners resonate with it.';
+    el.wrap.dataset.queued = q ? '1' : '';
     root.querySelector('[data-c-heading]').textContent = echo.heading != null ? `${Math.round(echo.heading)}\u00b0 ${cardinal(echo.heading)}` : 'n/a';
     const exp = new Date(echo.expires_at);
     root.querySelector('[data-c-exp]').textContent = exp.toLocaleString([], {
       weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
     });
-    root.querySelector('[data-c-source]').textContent = echo.source === 'local'
-      ? 'Saved on this device only for now: the shared map isn\u2019t reachable.' : 'It\u2019s on everyone\u2019s map now. Walk away and let someone find it.';
+    root.querySelector('[data-c-source]').textContent = q
+      ? 'No connection right now. It\u2019s saved on this phone and uploads by itself as soon as you\u2019re back online.'
+      : echo.source === 'local'
+        ? 'Saved on this device only for now: the shared map isn\u2019t reachable.' : 'It\u2019s on everyone\u2019s map now. Walk away and let someone find it.';
     lastEcho = echo;
     root.dataset.lastEchoId = echo.id;
     root.dataset.lastEchoSource = echo.source || '';
