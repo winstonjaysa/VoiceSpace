@@ -1,17 +1,28 @@
 -- =============================================================================
---  Echolocation · migration 002: shared live map (server-side fuzz + Realtime)
---  Run ONCE in Supabase Dashboard > SQL Editor > New query > paste this whole file > Run.
---  Idempotent: safe to re-run. Needs schema.sql (night crawler's backend) applied first.
+--  SUPERSEDED (2026-11-15) — DO NOT RUN THIS FILE.
+--  Everything here is folded into night crawler's single combined migration, which is the ONE file to paste:
+--      /home/box/shared/echolocation/v2/night-crawler/migration-v2.sql
+--  (same salt table, same _echo_fuzz, map_echoes exact-unless-blurred via _echo_pin, blurred + place_label
+--  columns, and the echo-map Realtime trigger, plus heat, reports, rate limits, zones, trails.)
+--  Kept for history only. It is now compatible with v2's rules (exact pin unless blurred) and refuses to run
+--  once migration-v2 is installed, so pasting it by mistake can't overwrite v2's map functions.
 --
---  What it adds:
---    1. A secret salt (never readable by clients) used to fuzz echo positions.
---    2. public.map_echoes(min_lat, min_lng, max_lat, max_lng): every live echo in a viewport, with
---       a FUZZED centre (30–60 m glow that contains the real spot) computed in the database.
---       Exact coordinates never leave the database through this function.
---    3. A trigger that broadcasts drop / update / gone on the public Realtime topic 'echo-map'
---       (fuzzed position only), so every open map updates within ~1 s.
---  The web app detects map_echoes by itself (re-checks every minute). No app change is needed.
+--  Echolocation · migration 002 (historical): shared live map + Realtime
+--    1. A secret salt (never readable by clients) for the stable per-echo blur.
+--    2. public.map_echoes(min_lat, min_lng, max_lat, max_lng): live echoes in a viewport. EXACT position
+--       (radius_m 0) unless the echo was dropped with blurred = true; blurred ones get a 30–60 m glow
+--       computed in the database.
+--    3. A trigger broadcasting drop / update / gone on the public Realtime topic 'echo-map'.
 -- =============================================================================
+
+-- 0. guard: superseded by migration-v2.sql -------------------------------------
+do $$ begin
+  if to_regprocedure('public._echo_pin(uuid,extensions.geography,boolean)') is not null then
+    raise exception '002_map_realtime.sql is superseded and migration-v2.sql is already installed: nothing to do.';
+  end if;
+end $$;
+
+alter table public.echoes add column if not exists blurred boolean not null default false;
 
 -- 1. secret salt --------------------------------------------------------------
 create table if not exists public.echo_private_salt (
@@ -46,12 +57,25 @@ begin
 end $$;
 revoke all on function public._echo_fuzz(uuid, extensions.geography) from public, anon, authenticated;
 
+-- 2b. pin: exact unless blurred (same contract as migration-v2's _echo_pin) ----------------
+create or replace function public._echo_pin(p_id uuid, p_loc extensions.geography, p_blurred boolean)
+returns table (lat double precision, lng double precision, radius_m double precision)
+language plpgsql stable security definer set search_path = '' as $$
+begin
+  if coalesce(p_blurred, false) then
+    return query select f.lat, f.lng, f.radius_m from public._echo_fuzz(p_id, p_loc) f;
+  else
+    return query select extensions.st_y(p_loc::extensions.geometry), extensions.st_x(p_loc::extensions.geometry), 0::double precision;
+  end if;
+end $$;
+revoke all on function public._echo_pin(uuid, extensions.geography, boolean) from public, anon, authenticated;
+
 -- 3. map_echoes: the map's only read path -------------------------------------------
 create or replace function public.map_echoes(
   min_lat double precision, min_lng double precision, max_lat double precision, max_lng double precision
 ) returns table (
   id uuid, lat double precision, lng double precision, radius_m double precision,
-  resonance_count integer, created_at timestamptz, expires_at timestamptz
+  resonance_count integer, created_at timestamptz, expires_at timestamptz, blurred boolean
 )
 language plpgsql stable security definer set search_path = '' as $$
 declare v_box extensions.geography;
@@ -68,9 +92,9 @@ begin
   -- pad by ~100 m so glows whose centre sits just outside the view are still drawn
   v_box := extensions.st_makeenvelope(min_lng - 0.0012, min_lat - 0.0009, max_lng + 0.0012, max_lat + 0.0009, 4326)::extensions.geography;
   return query
-    select e.id, f.lat, f.lng, f.radius_m, e.resonance_count, e.created_at, e.expires_at
+    select e.id, f.lat, f.lng, f.radius_m, e.resonance_count, e.created_at, e.expires_at, e.blurred
       from public.echoes e
-     cross join lateral public._echo_fuzz(e.id, e.location) f
+     cross join lateral public._echo_pin(e.id, e.location, e.blurred) f
      where e.expires_at > now()
        and extensions.st_intersects(e.location, v_box)
      order by e.created_at desc
@@ -79,9 +103,9 @@ end $$;
 revoke all on function public.map_echoes(double precision, double precision, double precision, double precision) from public;
 grant execute on function public.map_echoes(double precision, double precision, double precision, double precision) to anon, authenticated;
 
--- 4. Realtime: broadcast every change on the public topic 'echo-map' (fuzzed only) -------
+-- 4. Realtime: broadcast every change on the public topic 'echo-map' (same pin as map_echoes) -------
 --    Uses Supabase's realtime.send(payload, event, topic, private). private = false -> any client with the
---    publishable key can subscribe; nothing exact is ever sent. A broadcast failure never blocks a drop.
+--    publishable key can subscribe; blurred echoes only ever send their glow. A broadcast failure never blocks a drop.
 create or replace function public._echo_map_broadcast()
 returns trigger
 language plpgsql security definer set search_path = '' as $$
@@ -91,11 +115,12 @@ begin
     perform realtime.send(jsonb_build_object('id', old.id), 'gone', 'echo-map', false);
     return old;
   end if;
-  select * into f from public._echo_fuzz(new.id, new.location);
+  select * into f from public._echo_pin(new.id, new.location, new.blurred);
   perform realtime.send(
     jsonb_build_object('id', new.id, 'lat', f.lat, 'lng', f.lng, 'radius_m', f.radius_m,
                        'resonance_count', new.resonance_count, 'created_at', new.created_at,
-                       'expires_at', new.expires_at, 'fuzz', 'server'),
+                       'expires_at', new.expires_at, 'blurred', new.blurred,
+                       'fuzz', case when new.blurred then 'server' else 'none' end),
     case when tg_op = 'INSERT' then 'drop' else 'update' end, 'echo-map', false);
   return new;
 exception when others then
@@ -114,5 +139,5 @@ create trigger echoes_map_broadcast
 -- revoke execute on function public.debug_echoes(double precision,double precision,double precision) from anon, authenticated;
 
 -- Quick check (should return 1 row each):
--- select proname from pg_proc where proname in ('map_echoes', '_echo_fuzz', '_echo_map_broadcast');
+-- select proname from pg_proc where proname in ('map_echoes', '_echo_fuzz', '_echo_pin', '_echo_map_broadcast');
 -- select tgname from pg_trigger where tgname = 'echoes_map_broadcast';

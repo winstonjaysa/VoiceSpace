@@ -23,16 +23,25 @@
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js" defer></script>
 </head>
 <body>
-  <div id="map" class="map" aria-label="Map of echoes"></div>
+  <div id="map" class="map" role="region" aria-label="Map of echoes"></div>
+  <div class="map-skeleton" data-skeleton aria-hidden="true"><i></i><i></i><i></i><span>Loading the map…</span></div>
   <div class="map-shade" aria-hidden="true"></div>
 
   <header class="topbar">
-    <div class="brand">
+    <button class="brand" data-about-open aria-label="About Echolocation and settings" aria-haspopup="dialog">
       <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="2.6"/><path d="M10.5 10.5a7.8 7.8 0 0 0 0 11M21.5 10.5a7.8 7.8 0 0 1 0 11M6.6 6.6a13.3 13.3 0 0 0 0 18.8M25.4 6.6a13.3 13.3 0 0 1 0 18.8"/></svg>
       <span>Echolocation</span>
-    </div>
-    <div class="live glass" data-live data-state="connecting" role="status">
-      <i aria-hidden="true"></i><span data-live-text>Connecting</span>
+    </button>
+    <div class="status-stack">
+      <div class="live glass" data-live data-state="connecting" role="status" aria-live="polite">
+        <i aria-hidden="true"></i><span data-live-text><span class="skel-text">Connecting</span></span>
+      </div>
+      <button class="gps-pill glass" data-gps-pill data-q="off" aria-label="GPS accuracy: location off. Tap to turn on.">
+        <i aria-hidden="true"></i><span data-gps-text>GPS off</span>
+      </button>
+      <button class="outbox-pill glass" data-outbox hidden aria-live="polite">
+        <i aria-hidden="true"></i><span data-outbox-text>Queued, will upload</span>
+      </button>
     </div>
   </header>
 
@@ -45,13 +54,17 @@
       <span class="fab-aura" aria-hidden="true"></span>
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/></svg>
     </button>
-    <button class="dock-btn glass" data-locate aria-label="Center on me">
+    <button class="dock-btn glass" data-locate aria-label="Follow me on the map" aria-pressed="true">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/><circle cx="12" cy="12" r="7"/></svg>
       <span>You</span>
     </button>
   </nav>
 
-  <section class="sheet glass" id="card" data-card hidden aria-live="polite"></section>
+  <button class="recenter glass" data-recenter hidden aria-label="Re-center the map on me and follow">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 18-7-4-7 4z"/></svg><span>Re-center</span>
+  </button>
+  <section class="sheet glass" id="card" data-card hidden aria-live="polite" aria-label="Echo details"></section>
+  <section class="sheet glass about" id="about" data-about hidden role="dialog" aria-modal="false" aria-labelledby="about-title"></section>
   <section class="overlay" id="screen-record" aria-label="Record an echo" hidden></section>
   <section class="overlay" id="screen-listen" aria-label="Listen" hidden></section>
   <div class="toast glass" data-toast role="status" hidden></div>
