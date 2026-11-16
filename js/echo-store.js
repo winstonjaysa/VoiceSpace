@@ -288,7 +288,8 @@ const supabaseBackend = {
     const durationS = Math.min(60, Math.max(0.1, (durationMs || 0) / 1000));
     // migration-v2 live (map_echoes answered): send blurred + place_label as columns. Before it, drop_echo has no
     // such parameters, so call it exactly like v1 and keep the blur choice as a caption marker (maps read it back).
-    const v2 = mapMode === 'map_echoes';
+    // A blurred drop must never rely on a stale "v2 missing" cache: re-check right before writing the marker.
+    const v2 = mapMode === 'map_echoes' || (blurred ? await probeV2({ force: true }) : false);
     const args = { blob: typed, lat, lng, accuracyM, heading, altitude, durationS };
     if (v2) Object.assign(args, { caption, placeLabel: placeLabel || null, blurred: Boolean(blurred) });
     else args.caption = blurred ? withBlurMarker(caption) : caption;
@@ -320,10 +321,26 @@ const supabaseBackend = {
     return sb(() => sbClient.unlockEcho(echo.id, { lat, lng, accuracyM })); // throws TOO_FAR beyond 25 m + pad
   },
 
+  /** Debug map rows. map_echoes (migration-v2: exact pins, glow centre for blurred ones) when it exists;
+   *  debug_echoes (exact, v1) only while it doesn't; nearby_echoes (500 m) if debug_echoes is revoked too. */
   async listAllEchoes({ lat, lng, radiusM = 20000 } = {}) {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return [];
-    const rows = await sb(() => sbClient.debugEchoes({ lat, lng, radiusM }));
-    return rows.map((r) => fromServerRow(r));
+    const dLat = Math.min(0.99, radiusM / 111320), dLng = Math.min(0.99, radiusM / (111320 * Math.cos(lat * Math.PI / 180)));
+    const box = { minLat: Math.max(-90, lat - dLat), maxLat: Math.min(90, lat + dLat),
+      minLng: Math.max(-180, lng - dLng), maxLng: Math.min(180, lng + dLng) };
+    if (await probeV2()) {
+      const pins = await sb(() => sbClient.mapEchoes(box));
+      return pins.map((p) => ({ ...mapRecord(p, 'server'), accuracy_m: null, heading: null, source: 'supabase', via: 'map_echoes' }));
+    }
+    try {
+      const rows = await sb(() => sbClient.debugEchoes({ lat, lng, radiusM }));
+      return rows.map((r) => ({ ...fromServerRow(r), via: 'debug_echoes' }));
+    } catch (e) {
+      if (!(e instanceof SupabaseError) || !['SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
+      hintMigrationLive();                                            // revoked => v2 is probably in now
+      const rows = await sb(() => sbClient.nearbyEchoes({ lat, lng, radiusM: 500 }));
+      return rows.map((r) => ({ ...fromServerRow(r), via: 'nearby_echoes' }));
+    }
   },
 
   /** night crawler's hunt plug-in (createSupabaseSource), errors normalised to SupabaseError. */
@@ -555,7 +572,7 @@ export async function getAudioUrl(echo, pos = {}) {
 }
 
 /** Debug/testing only (debug.html): every echo with exact positions. Supabase needs a center {lat, lng}
- *  (debug_echoes RPC, 20 km radius); local includes expired ones. */
+ *  (map_echoes after migration-v2, else debug_echoes; 20 km radius); local includes expired ones. */
 export async function listAllEchoes(center = lastKnownPosition() || {}) {
   const local = (await localBackend.listAllEchoes()).map((e) => ({ ...e, source: 'local' }));
   const remote = await withFallback(() => supabaseBackend.listAllEchoes(center), () => []);
@@ -628,6 +645,34 @@ const MAP_PROBE_KEY = 'echolocation.map_echoes_missing_at';
 const MAP_REPROBE_MS = 60_000;      // map_echoes missing (404) is cached for the session; re-check once a minute
 let mapProbeAt = (() => { try { return Number(sessionStorage.getItem(MAP_PROBE_KEY)) || 0; } catch { return 0; } })();
 if (supabaseConfigured && mapProbeAt && Date.now() - mapProbeAt < MAP_REPROBE_MS) mapMode = 'legacy-debug';
+/**
+ * Is migration-v2 installed (map_echoes, drop_echo(..., blurred, place_label))? Uses the per-session cache
+ * (a missing map_echoes is re-checked once a minute) unless force. One tiny map_echoes call when it checks.
+ */
+let probeP = null;
+export async function probeV2({ force = false } = {}) {
+  if (mapMode === 'map_echoes') return true;
+  if (probeP) return probeP;                                          // one probe at a time; callers share it
+  if (!supabaseConfigured || supabaseDown) return false;
+  if (!force && mapProbeAt && Date.now() - mapProbeAt < MAP_REPROBE_MS) return false;
+  mapProbeAt = Date.now();
+  probeP = runProbe().finally(() => { probeP = null; });
+  return probeP;
+}
+async function runProbe() {
+  try {
+    await sb(() => sbClient.mapEchoes({ minLat: 0, minLng: 0, maxLat: 0.0001, maxLng: 0.0001 }));
+    mapMode = 'map_echoes';
+    try { sessionStorage.removeItem(MAP_PROBE_KEY); } catch { /* ignore */ }
+    return true;
+  } catch (e) {
+    if (!(e instanceof SupabaseError) || !['V2_MISSING', 'SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
+    if (mapMode === null) mapMode = 'legacy-debug';
+    try { sessionStorage.setItem(MAP_PROBE_KEY, String(mapProbeAt)); } catch { /* ignore */ }
+    return false;
+  }
+}
+
 /** Something hinted that migration-v2 is live (e.g. a trigger broadcast): probe map_echoes on the next poll. */
 export function hintMigrationLive() { if (mapMode !== 'map_echoes') mapProbeAt = 0; }
 const MINE_KEY = 'echolocation.mine';
@@ -726,7 +771,8 @@ export async function mapEchoes(bounds) {
         return rows.map((r) => ({ ...mapRecord(r), source: 'supabase' }));
       } catch (e) {
         if (!(e instanceof SupabaseError) || !['SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
-        mapMode = 'legacy-nearby';                                   // debug_echoes revoked
+        mapMode = 'legacy-nearby';                                   // debug_echoes revoked: v2 is likely in
+        mapProbeAt = 0;                                              // so look for map_echoes again on the next poll
       }
     }
     const rows = await sb(() => sbClient.nearbyEchoes({ lat, lng, radiusM: Math.min(500, radiusM) }));

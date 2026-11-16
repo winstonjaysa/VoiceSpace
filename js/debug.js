@@ -1,4 +1,5 @@
-// Hidden debug map (/debug.html). Shows every echo from echo-store (EXACT positions: debug only) + the user's position.
+// Hidden debug map (/debug.html). Shows every echo from echo-store + the user's position. Source: map_echoes once
+// migration-v2 is in (exact pins; blurred echoes only as their public glow centre), debug_echoes (exact) before it.
 // v2: MapLibre GL JS + OpenFreeMap dark (free, no token). Blurred echoes also show their public fuzzy glow (dashed ring)
 // as the main map draws it, so you can check the real spot always sits inside its glow.
 import * as store from './echo-store.js';
@@ -50,7 +51,8 @@ function toGeoJSON(list) {
 function toGlowGeoJSON(list) {
   // v3: echoes are exact pins on the public map; only "Blur my spot" ones get a public glow
   return { type: 'FeatureCollection', features: list.filter((e) => e.blurred).map((e) => {
-    const f = fuzzPoint(e.id, e.lat, e.lng);
+    // map_echoes already returns the glow (centre + radius); exact rows get the same blur the main map computes
+    const f = e.via === 'map_echoes' ? { lat: e.lat, lng: e.lng, radiusM: e.radius_m || 45 } : fuzzPoint(e.id, e.lat, e.lng);
     const ring = [];
     for (let i = 0; i <= 48; i++) {
       const a = (i / 48) * 2 * Math.PI;
@@ -76,10 +78,11 @@ async function render(fit = false) {
   try { echoes = await listAllEchoes(c || {}); } catch (err) { statusEl.textContent = `store error: ${err.message}`; return; }
   const now = Date.now();
   const list = showExpiredEl.checked ? echoes : echoes.filter((e) => !isExpired(e, now));
-  statusEl.textContent = `${list.length} shown / ${echoes.length} total · backend: ${store.backendName}${store.backendError ? ` (${store.backendError})` : ''}`;
+  const via = [...new Set(echoes.map((e) => e.via).filter(Boolean))].join('+');
+  statusEl.textContent = `${list.length} shown / ${echoes.length} total · backend: ${store.backendName}${via ? ` via ${via}` : ''}${store.backendError ? ` (${store.backendError})` : ''}`;
   document.body.dataset.echoCount = String(echoes.length);
   rowsEl.innerHTML = list.map((e) => `<tr class="${isExpired(e, now) ? 'expired' : ''}" data-id="${e.id}">
-    <td>${e.id.slice(0, 8)}</td><td>${e.lat.toFixed(6)}, ${e.lng.toFixed(6)}</td>
+    <td>${e.id.slice(0, 8)}${e.blurred ? ' (blurred)' : ''}</td><td>${e.lat.toFixed(6)}, ${e.lng.toFixed(6)}${e.via === 'map_echoes' && e.blurred ? ' (glow centre)' : ''}</td>
     <td>${e.accuracy_m != null ? Math.round(e.accuracy_m) : ''}</td><td>${e.heading != null ? Math.round(e.heading) : ''}</td>
     <td>${fmt(e.created_at)}</td><td>${fmt(e.expires_at)}</td><td>${e.resonance_count}</td>
     <td>${((e.duration_ms || 0) / 1000).toFixed(1)}s</td><td>${e.source || ''}</td><td><button data-play="${e.id}">▶</button></td></tr>`).join('');
