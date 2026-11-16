@@ -19,6 +19,7 @@ import {
   ECHO_TTL_MS, RESONATE_EXTENSION_MS, DEFAULT_NEARBY_RADIUS_M,
 } from './config.js';
 import * as sbClient from './echoes-client.js'; // night crawler's Supabase client (see SUPABASE BACKEND below)
+import { fuzzPoint } from './fuzz.js';
 
 // Fires 'drop', 'resonate' and 'backend' (fell back to local) events (detail = echo record) so screens can refresh.
 export const events = new EventTarget();
@@ -363,6 +364,7 @@ export async function dropEcho(rawInput) {
     async () => ({ ...(await localBackend.dropEcho(input)), source: 'local' }));
   // Also carry trax's return shape ({ id, audioPath }) so either caller style works.
   const echo = { ...saved, audioPath: saved.audio_path };
+  markMine(echo.id);
   events.dispatchEvent(new CustomEvent('drop', { detail: echo }));
   return echo;
 }
@@ -448,4 +450,101 @@ export function createHuntSource() {
     },
   };
   return src;
+}
+
+// ---------------------------------------------------------------------------
+// MAP (v2): shared live map. Every map record is FUZZED: { id, lat, lng, radius_m, resonance_count,
+// created_at, expires_at, source, fuzz: 'server' | 'client', mine }. lat/lng is the centre of a 30–60 m glow
+// that contains the real spot, never the spot itself.
+//   - After backend/migrations/002_map_realtime.sql: map_echoes(bbox) fuzzes on the server (secret salt).
+//   - Before it: debug_echoes(centre, radius) (or nearby_echoes within 500 m if debug is revoked) and
+//     js/fuzz.js fuzzes on the phone. Exact coordinates are dropped right after fuzzing.
+//   mapMode tells which path is live: 'map_echoes' | 'legacy-debug' | 'legacy-nearby' | 'local'.
+// ---------------------------------------------------------------------------
+export let mapMode = supabaseConfigured ? null : 'local';
+let mapProbeAt = 0;
+const MAP_REPROBE_MS = 60_000;      // re-check for the migration once a minute, so it switches over by itself
+const MINE_KEY = 'echolocation.mine';
+
+function readMine() { try { return JSON.parse(localStorage.getItem(MINE_KEY)) || {}; } catch { return {}; } }
+/** Remember echoes dropped from this device (the server never reveals device ids). */
+export function markMine(id) {
+  if (!id) return;
+  const m = readMine(); m[id] = Date.now();
+  const cutoff = Date.now() - 8 * 24 * 3600e3;                       // echoes live 7 days max
+  for (const k of Object.keys(m)) if (m[k] < cutoff) delete m[k];
+  try { localStorage.setItem(MINE_KEY, JSON.stringify(m)); } catch { /* ignore */ }
+}
+export function isMine(id) { return Boolean(readMine()[id]); }
+
+/** Ready supabase-js client (or null when the backend is unavailable). Used by the map feed for Realtime. */
+export async function supabaseClient() {
+  if (supabaseDown) return null;
+  try { await sbReady(); return sbClient.getClient(); } catch { return null; }
+}
+
+const inBox = (b, lat, lng) => lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng;
+function fuzzRow(r, fuzz = 'client') {
+  const lat = r.echo_lat ?? r.lat, lng = r.echo_lng ?? r.lng;
+  const f = fuzz === 'server' ? { lat, lng, radiusM: r.radius_m } : fuzzPoint(r.id, lat, lng);
+  return {
+    id: r.id, lat: f.lat, lng: f.lng, radius_m: f.radiusM,
+    resonance_count: r.resonance_count ?? 0,
+    created_at: r.created_at ? new Date(r.created_at).toISOString() : null,
+    expires_at: r.expires_at ? new Date(r.expires_at).toISOString() : null,
+    fuzz, mine: isMine(r.id),
+  };
+}
+
+/** Fuzzed echoes inside a viewport { minLat, minLng, maxLat, maxLng } (+ local-only ones). */
+export async function mapEchoes(bounds) {
+  const b = bounds;
+  const now = Date.now();
+  const local = (await localBackend.listAllEchoes())
+    .filter((e) => !isExpired(e, now) && inBox(b, e.lat, e.lng))
+    .map((e) => ({ ...fuzzRow(e), source: 'local', mine: true }));
+  const remote = await withFallback(async () => {
+    const tryNew = mapMode === 'map_echoes' || mapMode === null || now - mapProbeAt > MAP_REPROBE_MS;
+    if (tryNew) {
+      mapProbeAt = now;
+      try {
+        const rows = await sb(() => sbClient.mapEchoes(b));
+        mapMode = 'map_echoes';
+        return rows.map((r) => ({ ...fuzzRow(r, 'server'), source: 'supabase' }));
+      } catch (e) {
+        // function not there yet (migration not run) -> legacy path; anything else is a real error
+        if (!(e instanceof SupabaseError) || !['SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
+        if (mapMode === 'map_echoes' || mapMode === null) mapMode = 'legacy-debug';
+      }
+    }
+    const lat = (b.minLat + b.maxLat) / 2, lng = (b.minLng + b.maxLng) / 2;
+    const radiusM = Math.min(20000, Math.max(200, haversineM(lat, lng, b.maxLat, b.maxLng)));
+    if (mapMode !== 'legacy-nearby') {
+      try {
+        const rows = await sb(() => sbClient.debugEchoes({ lat, lng, radiusM }));
+        mapMode = 'legacy-debug';
+        return rows.map((r) => ({ ...fuzzRow(r), source: 'supabase' }));
+      } catch (e) {
+        if (!(e instanceof SupabaseError) || !['SCHEMA_MISSING', 'FORBIDDEN'].includes(e.code)) throw e;
+        mapMode = 'legacy-nearby';                                   // debug_echoes revoked
+      }
+    }
+    const rows = await sb(() => sbClient.nearbyEchoes({ lat, lng, radiusM: Math.min(500, radiusM) }));
+    return rows.map((r) => ({ ...fuzzRow(r), source: 'supabase' }));
+  }, () => { mapMode = 'local'; return []; });
+  return [...remote, ...local];
+}
+
+/** Take back an echo this device dropped (Supabase retract_echo, or delete the local copy). */
+export async function retractEcho(id) {
+  if (await isLocalId(id)) {
+    const db = await openDb();
+    const tx = db.transaction(['echoes', 'audio'], 'readwrite');
+    tx.objectStore('echoes').delete(id); tx.objectStore('audio').delete(id);
+    await txDone(tx);
+  } else {
+    await sb(() => sbClient.retractEcho(id));
+  }
+  events.dispatchEvent(new CustomEvent('retract', { detail: { id } }));
+  return true;
 }

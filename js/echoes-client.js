@@ -148,6 +148,16 @@ export async function debugEchoes({ lat, lng, radiusM = 2000 } = {}) {
   return (await rpc('debug_echoes', { lat, lng, radius_m: radiusM })) || [];
 }
 
+/** The initialised supabase-js client (map feed uses it for the Realtime 'echo-map' channel). */
+export function getClient() { return client(); }
+
+/** MAP (needs backend/migrations/002_map_realtime.sql): mapEchoes({minLat,minLng,maxLat,maxLng})
+ *  -> [{ id, lat, lng, radius_m, resonance_count, created_at, expires_at }] with lat/lng already FUZZED server-side.
+ *  Throws SCHEMA_MISSING before the migration is applied (echo-store then falls back to client-side fuzzing). */
+export async function mapEchoes({ minLat, minLng, maxLat, maxLng } = {}) {
+  return (await rpc('map_echoes', { min_lat: minLat, min_lng: minLng, max_lat: maxLat, max_lng: maxLng })) || [];
+}
+
 const toHunt = (r) => ({
   id: r.id, lat: r.echo_lat, lng: r.echo_lng,          // real coordinates (hunt computes distance/bearing on the phone)
   distanceM: r.distance_m, bearingDeg: r.bearing_deg,

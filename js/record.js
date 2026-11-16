@@ -13,17 +13,22 @@ const RING_C = 2 * Math.PI * RING_R;
 const TAP_THRESHOLD_MS = 350; // press shorter than this = tap mode (tap again to stop)
 const MIN_CLIP_MS = 500;
 
+const ICON_CLOSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 const TEMPLATE = `
 <div class="rec" data-phase="gate">
-  <div class="rec-status">
-    <span class="pill" data-gps>GPS off</span>
-    <span class="pill" data-compass>Compass off</span>
-  </div>
+  <header class="rec-top">
+    <button class="icon-btn" data-close aria-label="Close">${ICON_CLOSE}</button>
+    <div class="rec-status">
+      <span class="pill" data-gps>GPS off</span>
+      <span class="pill" data-compass>Compass off</span>
+    </div>
+  </header>
 
   <div class="rec-gate" data-gate>
-    <div class="rec-logo" aria-hidden="true"><span></span><span></span><span></span></div>
-    <h1>Leave an Echo</h1>
-    <p>Record up to 30 seconds and drop it exactly where you stand. Others find it by walking.</p>
+    <div class="rec-logo" aria-hidden="true"><span></span><span></span><span></span><i></i></div>
+    <p class="eyebrow">New echo</p>
+    <h1>Leave your voice here</h1>
+    <p class="lede">Up to 30 seconds, pinned to where you stand. Everyone sees a soft glow on the map. Only people who walk here can hear it.</p>
     <button class="btn primary big" data-enable>Enable mic &amp; location</button>
     <p class="err" data-gate-err role="alert"></p>
   </div>
@@ -33,6 +38,7 @@ const TEMPLATE = `
     <div class="meter" aria-hidden="true"><div class="meter-fill" data-meter></div></div>
 
     <button class="rec-btn" data-rec aria-label="Hold to record">
+      <span class="rec-aura" aria-hidden="true"></span>
       <svg viewBox="0 0 200 200" aria-hidden="true">
         <circle class="ring-bg" cx="100" cy="100" r="${RING_R}"/>
         <circle class="ring-fg" data-ring cx="100" cy="100" r="${RING_R}"
@@ -53,18 +59,21 @@ const TEMPLATE = `
   </div>
 
   <div class="rec-confirm" data-confirm hidden>
-    <div class="ripple" aria-hidden="true"></div>
-    <h2>Echo dropped</h2>
+    <div class="ripple" aria-hidden="true"><span></span><span></span><span></span></div>
+    <p class="eyebrow">Dropped</p>
+    <h2>Your echo is out there</h2>
+    <p class="lede" data-c-source></p>
     <dl>
-      <dt>Latitude</dt><dd data-c-lat></dd>
-      <dt>Longitude</dt><dd data-c-lng></dd>
+      <dt>Position</dt><dd><span data-c-lat></span>, <span data-c-lng></span></dd>
       <dt>Accuracy</dt><dd data-c-acc></dd>
       <dt>Heading</dt><dd data-c-heading></dd>
-      <dt>Fades at</dt><dd data-c-exp></dd>
+      <dt>Fades</dt><dd data-c-exp></dd>
     </dl>
-    <p class="muted">It decays in 24 h unless listeners resonate with it.</p>
-    <p class="muted small" data-c-source></p>
-    <button class="btn primary big" data-another>Record another</button>
+    <p class="muted small">It fades in 24 h unless listeners resonate with it. The map shows a 30–60 m glow, never this exact spot.</p>
+    <div class="row">
+      <button class="btn" data-another>Record another</button>
+      <button class="btn primary" data-see>See it on the map</button>
+    </div>
   </div>
 </div>`;
 
@@ -88,7 +97,8 @@ export function pickMimeType() {
   return ''; // let the browser choose
 }
 
-export function mountRecordScreen(root) {
+/** mountRecordScreen(root, { onClose, onDropped, autoStart }). autoStart: call it inside a tap to skip the gate. */
+export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => {}, autoStart = false } = {}) {
   root.innerHTML = TEMPLATE;
   const $ = (s) => root.querySelector(s);
   const el = {
@@ -98,8 +108,9 @@ export function mountRecordScreen(root) {
     rec: $('[data-rec]'), ring: $('[data-ring]'), hint: $('[data-hint]'),
     review: $('[data-review]'), audio: $('[data-audio]'), rerecord: $('[data-rerecord]'),
     drop: $('[data-drop]'), warn: $('[data-warn]'),
-    confirm: $('[data-confirm]'), another: $('[data-another]'),
+    confirm: $('[data-confirm]'), another: $('[data-another]'), close: $('[data-close]'), see: $('[data-see]'),
   };
+  let lastEcho = null;
 
   const s = {
     phase: 'gate', stream: null, mimeType: null, recorder: null, chunks: [],
@@ -170,21 +181,25 @@ export function mountRecordScreen(root) {
   });
 
   // ---------------------------------------------------------------- geolocation
+  // Fixes come from this screen's own watch and from the map's watch (setFix), whichever is newer.
+  function applyFix(pos) {
+    const c = pos.coords;
+    if (s.fix && pos.timestamp < s.fix.ts) return;
+    s.fix = {
+      lat: c.latitude, lng: c.longitude, accuracy: c.accuracy,
+      altitude: Number.isFinite(c.altitude) ? c.altitude : null, ts: pos.timestamp,
+    };
+    const acc = Math.round(c.accuracy);
+    setPill(el.gps, `GPS \u00b1${acc} m`, c.accuracy <= GPS_GOOD_ACCURACY_M ? 'good' : 'wait');
+    updateDropButton();
+  }
+
   function startGeolocation() {
     if (!('geolocation' in navigator)) { setPill(el.gps, 'No GPS', 'bad'); return; }
     if (s.watchId != null) return;
     setPill(el.gps, 'Locating\u2026', 'wait');
     s.watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const c = pos.coords;
-        s.fix = {
-          lat: c.latitude, lng: c.longitude, accuracy: c.accuracy,
-          altitude: Number.isFinite(c.altitude) ? c.altitude : null, ts: pos.timestamp,
-        };
-        const acc = Math.round(c.accuracy);
-        setPill(el.gps, `GPS \u00b1${acc} m`, c.accuracy <= GPS_GOOD_ACCURACY_M ? 'good' : 'wait');
-        updateDropButton();
-      },
+      applyFix,
       (err) => {
         setPill(el.gps, err.code === 1 ? 'GPS denied' : 'GPS error', 'bad');
         if (err.code === 1) { navigator.geolocation.clearWatch(s.watchId); s.watchId = null; }
@@ -363,8 +378,8 @@ export function mountRecordScreen(root) {
   });
 
   function showConfirmation(echo) {
-    root.querySelector('[data-c-lat]').textContent = echo.lat.toFixed(6);
-    root.querySelector('[data-c-lng]').textContent = echo.lng.toFixed(6);
+    root.querySelector('[data-c-lat]').textContent = echo.lat.toFixed(5);
+    root.querySelector('[data-c-lng]').textContent = echo.lng.toFixed(5);
     root.querySelector('[data-c-acc]').textContent = echo.accuracy_m != null ? `\u00b1${Math.round(echo.accuracy_m)} m` : 'unknown';
     root.querySelector('[data-c-heading]').textContent = echo.heading != null ? `${Math.round(echo.heading)}\u00b0 ${cardinal(echo.heading)}` : 'n/a';
     const exp = new Date(echo.expires_at);
@@ -372,7 +387,8 @@ export function mountRecordScreen(root) {
       weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
     });
     root.querySelector('[data-c-source]').textContent = echo.source === 'local'
-      ? 'Saved on this device only (shared backend not reachable yet).' : 'Shared \u00b7 others nearby can find it.';
+      ? 'Saved on this device only for now: the shared map isn\u2019t reachable.' : 'It\u2019s on everyone\u2019s map now. Walk away and let someone find it.';
+    lastEcho = echo;
     root.dataset.lastEchoId = echo.id;
     root.dataset.lastEchoSource = echo.source || '';
     el.audio.pause();
@@ -381,6 +397,8 @@ export function mountRecordScreen(root) {
   }
 
   el.another.addEventListener('click', () => setPhase('ready'));
+  el.see.addEventListener('click', () => onDropped(lastEcho));
+  el.close.addEventListener('click', () => onClose());
 
   // ---------------------------------------------------------------- small helpers
   function setRing(frac) { el.ring.style.strokeDashoffset = String(RING_C * (1 - Math.min(1, Math.max(0, frac)))); }
@@ -388,8 +406,11 @@ export function mountRecordScreen(root) {
   function setPill(node, text, state) { node.textContent = text; node.dataset.state = state; }
 
   setPhase('gate');
+  if (autoStart) el.enable.click();   // still inside the opening tap: permissions + AudioContext are allowed
 
   return {
+    /** feed a GeolocationPosition-like { coords, timestamp } from the host's own watch */
+    setFix(pos) { if (pos?.coords && s.watchId != null) applyFix(pos); },
     // for the shell: release the mic when the screen is hidden for long, etc.
     destroy() {
       cancelAnimationFrame(s.raf);

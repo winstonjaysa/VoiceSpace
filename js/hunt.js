@@ -57,19 +57,37 @@ function storeSource(store) {
   return src;
 }
 
-const CSS = `
-.hx{display:flex;flex-direction:column;align-items:center;gap:14px;padding:24px 12px;text-align:center}
-.hx-stage{position:relative;width:min(70vw,260px);aspect-ratio:1;display:grid;place-items:center}
-.hx-ring,.hx-rip{position:absolute;inset:0;border-radius:50%;border:2px solid rgba(255,255,255,.18)}
-.hx-rip{opacity:0}
-.hx-core{width:14px;height:14px;border-radius:50%;background:#fff;opacity:.35}
-.hx-word{font-size:1.6rem;letter-spacing:.04em;min-height:2rem}
-.hx-note{opacity:.65;min-height:1.2rem;font-size:.95rem}
-.hx button{font:inherit;padding:12px 22px;border-radius:999px;border:1px solid rgba(255,255,255,.3);background:transparent;color:inherit;min-height:44px}
-.hx-res{display:none}.hx-res.show{display:inline-block}
-.hx-tap{display:none}`;
+function targetedSource(base, targetId) {
+  const src = {
+    ...base, echoes: [], targetId,
+    async nearby(q = {}) {
+      const all = await base.nearby({ ...q, radiusM: Math.max(q.radiusM || 0, 500) });
+      return (src.echoes = all.filter(e => e.id === targetId));
+    },
+    unlock: (id, q) => base.unlock(id, q),
+    resonate: (id, q) => base.resonate(id, q),
+  };
+  return src;
+}
 
-export async function startHunt(container, { store, desk = new URLSearchParams(location.search).has('desk'), onState } = {}) {
+const CSS = `
+.hx{display:flex;flex-direction:column;align-items:center;gap:18px;padding:12px 12px 24px;text-align:center}
+.hx-stage{position:relative;width:min(78vw,320px);aspect-ratio:1;display:grid;place-items:center}
+.hx-stage::before{content:"";position:absolute;inset:-18%;border-radius:50%;background:radial-gradient(closest-side,rgba(143,211,232,.16),rgba(143,211,232,0) 70%);pointer-events:none}
+.hx-ring,.hx-rip{position:absolute;inset:0;border-radius:50%;border:1px solid rgba(190,226,240,.22)}
+.hx-ring{box-shadow:0 0 60px rgba(143,211,232,.10) inset,0 0 40px rgba(143,211,232,.08);transition:filter .3s,border-color .3s}
+.hx-rip{opacity:0;border-color:rgba(190,226,240,.55)}
+.hx-core{width:10px;height:10px;border-radius:50%;background:#eef6ff;box-shadow:0 0 18px 6px rgba(190,226,240,.45)}
+.hx-word{font-size:2.1rem;font-weight:300;letter-spacing:.18em;text-transform:uppercase;min-height:2.6rem;color:#eef2f8}
+.hx-note{color:rgba(214,222,236,.62);min-height:1.2rem;font-size:.92rem;letter-spacing:.02em}
+.hx button{font:inherit;font-weight:500;padding:13px 24px;border-radius:14px;border:1px solid rgba(214,226,246,.18);background:rgba(255,255,255,.06);color:#eef2f8;min-height:48px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.hx-res{display:none}.hx-res.show{display:inline-block;border-color:rgba(242,211,176,.45);color:#f6e6d2;box-shadow:0 0 28px rgba(242,211,176,.12)}
+.hx-tap{display:none}
+@media (prefers-reduced-motion: reduce){.hx-ring{transition:none}}`;
+
+// targetId (v2 map: "Walk to it"): hunt only that echo. The engine then asks for 500 m (the server max) so it starts
+// pinging as early as possible; beyond that the host screen guides toward the echo's glow on its own.
+export async function startHunt(container, { store, desk = new URLSearchParams(location.search).has('desk'), onState, targetId = null, options = {} } = {}) {
   container.innerHTML = `<style>${CSS}</style><div class="hx">
     <div class="hx-stage"><div class="hx-rip"></div><div class="hx-rip"></div><div class="hx-ring"></div><div class="hx-core"></div></div>
     <div class="hx-word"></div><div class="hx-note">finding you…</div>
@@ -101,9 +119,10 @@ export async function startHunt(container, { store, desk = new URLSearchParams(l
   const pulse = k => rips[ri++ % rips.length].animate(
     [{ transform: 'scale(.35)', opacity: .75 * k }, { transform: 'scale(1.08)', opacity: 0 }], { duration: 1300, easing: 'cubic-bezier(.2,.6,.3,1)' });
 
-  const source = typeof store.createHuntSource === 'function' ? store.createHuntSource() : storeSource(store);
+  const base = typeof store.createHuntSource === 'function' ? store.createHuntSource() : storeSource(store);
+  const source = targetId ? targetedSource(base, targetId) : base;
   const hunt = createHunt({ source, onState: render, onPing: p => pulse(p.distanceM < 40 ? 1 : 0.7),
-    options: desk ? { useDeviceGeolocation: false, useDeviceCompass: false } : {} });
+    options: { ...(targetId ? { searchRadiusM: 500 } : {}), ...(desk ? { useDeviceGeolocation: false, useDeviceCompass: false } : {}), ...options } });
   const started = hunt.start();                   // synchronous gesture-bound work happens here (iOS compass + audio)
   $('.hx-res').onclick = () => hunt.resonate().catch(e => { $('.hx-note').textContent = /already/.test(e.message) ? 'you already resonated this one' : /own/.test(e.message) ? "that one's yours" : 'the echo would not hold'; });
   $('.hx-tap').onclick = () => hunt.resumeAudio();
