@@ -13,6 +13,7 @@ import { preciseFix, placeLabel, distM } from './precise-fix.js';
 import { STYLES } from './map.js';
 import { haptic, spring } from './fx.js';
 import { setDuration } from './opened.js';
+import { resolvePlace, placeLabel as placeText, KIND_TO_DB, levelToInt, levelShort, ROAD_WARN } from './place.js';
 
 const LOCK_WINDOW_MS = 15000;     // wait up to 15 s for a good fix
 const LOCK_TARGET_M = 15;         // ... at or under 15 m
@@ -104,6 +105,15 @@ const TEMPLATE = `
     <p class="eyebrow">Confirm your spot</p>
     <h2 data-spot-title>Is the pin where you are?</h2>
     <div class="spot-map" data-spot-map role="application" aria-label="Map: drag the pin onto the exact spot where you are"></div>
+    <div class="spot-place" data-spot-place>
+      <span class="place-chip" data-place-chip data-kind="checking" aria-live="polite">Checking where you are…</span>
+      <button class="btn small" data-place-snap hidden></button>
+    </div>
+    <p class="spot-warn" data-spot-warn role="alert" hidden></p>
+    <fieldset class="floor" data-floor hidden>
+      <legend>Which floor? <small>optional</small></legend>
+      <div class="chips" role="radiogroup" aria-label="Floor" data-floor-chips></div>
+    </fieldset>
     <p class="spot-note" data-spot-note role="status"></p>
     <div class="row">
       <button class="btn" data-spot-relock>Re-lock</button>
@@ -117,7 +127,7 @@ const TEMPLATE = `
     <h2 data-c-title>Your echo is out there</h2>
     <p class="lede" data-c-source></p>
     <dl>
-      <dt>Near</dt><dd data-c-place></dd>
+      <dt>Where</dt><dd data-c-place></dd>
       <dt>Position</dt><dd><span data-c-lat></span>, <span data-c-lng></span></dd>
       <dt>Accuracy</dt><dd data-c-acc></dd>
       <dt>Heading</dt><dd data-c-heading></dd>
@@ -172,6 +182,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     lockTitle: $('[data-lock-title]'), lockNote: $('[data-lock-note]'), lockCancel: $('[data-lock-cancel]'), lockSkip: $('[data-lock-skip]'),
     spot: $('[data-spot]'), spotMap: $('[data-spot-map]'), spotNote: $('[data-spot-note]'), spotTitle: $('[data-spot-title]'),
     spotOk: $('[data-spot-ok]'), spotRelock: $('[data-spot-relock]'),
+    placeChip: $('[data-place-chip]'), snapBtn: $('[data-place-snap]'), spotWarn: $('[data-spot-warn]'), floor: $('[data-floor]'), floorChips: $('[data-floor-chips]'),
     undo: $('[data-undo]'), undoN: $('[data-undo-n]'), undoBar: $('[data-undo-bar]'),
     confirm: $('[data-confirm]'), another: $('[data-another]'), close: $('[data-close]'), see: $('[data-see]'),
   };
@@ -527,6 +538,9 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
 
   function showSpot(fix) {
     spotFix = fix; setPhase('spot'); haptic(fix.lowConfidence ? 'warn' : 'success');
+    pinCtx = null; snapped = null; floorSel = null; root.dataset.snapped = '0';
+    el.snapBtn.hidden = true; el.spotWarn.hidden = true; el.floor.hidden = true;
+    spotPin?.getElement().querySelector('.pin-warn')?.setAttribute('hidden', '');
     const acc = Math.round(fix.accuracy);
     el.spotTitle.textContent = fix.lowConfidence ? 'Weak signal: check the pin' : 'Is the pin where you are?';
     el.spotOk.textContent = fix.lowConfidence ? 'Yes, I\u2019m here' : 'Drop here';
@@ -544,7 +558,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
       root.__spotMap = spotMap;                         // tests
       spotMap.on('styleimagemissing', (e) => { if (!spotMap.hasImage(e.id)) spotMap.addImage(e.id, { width: 1, height: 1, data: new Uint8Array(4) }); });
       spotMap.on('error', (e) => console.info('[spot-map]', e?.error?.message || e));
-      const elPin = document.createElement('div'); elPin.className = 'spot-pin'; elPin.innerHTML = '<i></i>';
+      const elPin = document.createElement('div'); elPin.className = 'spot-pin'; elPin.innerHTML = '<b class="pin-warn" hidden>\u26A0 In the road</b><i></i>';
       elPin.setAttribute('aria-label', 'Your spot'); elPin.setAttribute('role', 'img');
       spotPin = new ml.Marker({ element: elPin, draggable: true, anchor: 'bottom' }).setLngLat([fix.lng, fix.lat]).addTo(spotMap);
       spotPin.on('dragstart', () => haptic('tick'));
@@ -555,7 +569,67 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
       requestAnimationFrame(() => spotMap.resize());
     }
     root.dataset.spotMoved = '0';
+    lookupPlace(fix, { allowSnap: true });
   }
+
+  // ---------------------------------------------------------------- place context (inside / on a road / in a park)
+  let placeRun = 0, pinCtx = null, fixCtx = null, snapped = null, floorSel = null, placeT = 0;
+  const blurOn = () => Boolean(el.blur?.checked);
+  function setChip(text, kind) { el.placeChip.textContent = text; el.placeChip.dataset.kind = kind; root.dataset.placeKind = kind; }
+  async function lookupPlace(at, { allowSnap = false, userPlaced = false } = {}) {
+    const run = ++placeRun;
+    setChip('Checking where you are\u2026', 'checking');
+    const ctx = await resolvePlace({ lat: at.lat, lng: at.lng, accuracy: userPlaced ? 5 : at.accuracy },
+      { map: spotMap || null, store, blurred: blurOn() || !allowSnap });
+    if (run !== placeRun || s.phase !== 'spot') return;
+    root.dataset.placeSource = ctx?.source || 'none';
+    if (allowSnap) { fixCtx = ctx; snapped = null; }
+    if (allowSnap && ctx?.snap && !blurOn()) { applySnap(ctx); return; }
+    applyCtx(ctx);
+  }
+  function applyCtx(ctx) {
+    pinCtx = ctx && ctx.kind !== 'unknown' ? ctx : null;
+    const road = pinCtx?.kind === 'road';
+    setChip(pinCtx?.label || 'Couldn\u2019t tell what\u2019s here', pinCtx?.kind || 'unknown');
+    const warnEl = spotPin?.getElement().querySelector('.pin-warn');
+    if (warnEl) warnEl.hidden = !road;
+    el.spotWarn.hidden = !road;
+    el.spotWarn.textContent = road ? ROAD_WARN : '';
+    if (road) haptic('warn');
+    el.snapBtn.hidden = !snapped;
+    renderFloors(pinCtx?.kind === 'indoor' ? pinCtx.levels : null, pinCtx?.floorHint);
+  }
+  function applySnap(ctx) {
+    const sp = ctx.snap; const from = spotPin.getLngLat();
+    snapped = { from: { lat: from.lat, lng: from.lng }, to: { lat: sp.lat, lng: sp.lng }, ctx };
+    spring(0, 1, (k) => spotPin.setLngLat([from.lng + (sp.lng - from.lng) * k, from.lat + (sp.lat - from.lat) * k]), { stiffness: 200, damping: 20, precision: 0.002 });
+    haptic('success');
+    root.dataset.snapped = '1';
+    applyCtx({ kind: 'indoor', name: sp.name, label: `Inside ${sp.name}`, levels: sp.levels || [], building: { name: sp.name, extentM: sp.extentM || 40 }, source: ctx.source, mall: sp.mall });
+    el.spotNote.dataset.q = 'ok';
+    el.spotNote.textContent = `GPS put you on ${ctx.road?.name || 'the road'} (\u00b1${Math.round(spotFix.accuracy)} m), so the pin moved ${Math.round(sp.distM)} m inside ${sp.name}. Drag it if that\u2019s wrong.`;
+    el.snapBtn.textContent = `Keep it on ${ctx.road?.name || 'the road'}`;
+    el.snapBtn.hidden = false;
+  }
+  el.snapBtn.addEventListener('click', () => {
+    if (!snapped) return;
+    const { from, ctx } = snapped; snapped = null; root.dataset.snapped = '0';
+    spotPin.setLngLat([from.lng, from.lat]); haptic('tap');
+    applyCtx(ctx);
+    el.spotNote.textContent = 'Back where GPS put you. Drag the pin if it\u2019s off.';
+  });
+  function renderFloors(levels, hint) {
+    if (!levels?.length || blurOn()) { el.floor.hidden = true; floorSel = null; return; }
+    el.floor.hidden = false;
+    if (hint && floorSel == null) floorSel = hint;
+    el.floorChips.innerHTML = levels.map((l) => `<button type="button" class="chip-btn" role="radio" aria-checked="${l === floorSel}" data-level="${l}">${levelShort(l)}</button>`).join('');
+  }
+  el.floorChips.addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-level]'); if (!b) return;
+    floorSel = floorSel === b.dataset.level ? null : b.dataset.level; haptic('tick');
+    for (const c of el.floorChips.querySelectorAll('[data-level]')) c.setAttribute('aria-checked', String(c.dataset.level === floorSel));
+    if (pinCtx) setChip(placeText(pinCtx, floorSel) || pinCtx.label, pinCtx.kind);
+  });
   function circleGeo({ lat, lng }, r) {
     const pts = []; for (let i = 0; i <= 48; i++) { const a = (i / 48) * 2 * Math.PI;
       pts.push([lng + (r * Math.sin(a)) / (111320 * Math.cos(lat * Math.PI / 180)), lat + (r * Math.cos(a)) / 110540]); }
@@ -585,6 +659,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
       root.dataset.spotMoved = d >= 1 ? '1' : '0';
       el.spotNote.dataset.q = 'good';
       el.spotNote.textContent = d >= 1 ? `Moved ${Math.round(d)} m. Drop when it\u2019s right on your spot.` : el.spotNote.textContent;
+      if (d >= 3) { snapped = null; root.dataset.snapped = '0'; clearTimeout(placeT); placeT = setTimeout(() => lookupPlace({ lat: ll.lat, lng: ll.lng }, { userPlaced: true }), 350); }
     }
   }
 
@@ -594,10 +669,16 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     const ll = spotPin ? spotPin.getLngLat() : { lat: spotFix.lat, lng: spotFix.lng };
     const moved = distM(spotFix, { lat: ll.lat, lng: ll.lng });
     const fix = { ...spotFix, lat: ll.lat, lng: ll.lng, adjustedM: moved >= 1 ? moved : 0 };
-    const place = await Promise.race([labelP || Promise.resolve(null), new Promise((r) => setTimeout(() => r(null), 1500))]);
+    const blurred = el.blur.checked;
+    const ctxLabel = pinCtx ? placeText(pinCtx, floorSel, { blurred }) : null;
+    const place = ctxLabel || (blurred ? null : await Promise.race([labelP || Promise.resolve(null), new Promise((r) => setTimeout(() => r(null), 1500))]));
+    const generic = !pinCtx?.name || /^(a|an) /.test(pinCtx.name);
     try {
       const args = {
-        blurred: el.blur.checked, placeLabel: place || null,
+        blurred, placeLabel: place || null,
+        placeKind: pinCtx ? KIND_TO_DB[pinCtx.kind] || null : null,
+        placeName: pinCtx && !generic && !blurred ? pinCtx.name.slice(0, 120) : null,
+        level: pinCtx?.kind === 'indoor' && !blurred ? levelToInt(floorSel) : null,
         transcript: s.transcript || null, tags: s.tags?.length ? s.tags : null,
         unlockAt: !replyTo && v2() ? s.unlockAt || null : null, accuracy: fix.accuracy,
         blob: s.blob, mimeType: s.blob.type, durationMs: Math.round(s.durationMs),
@@ -630,7 +711,7 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
       + (lastFix?.lowConfidence ? ' \u00b7 weak GPS, confirmed by you' : lastFix?.samples > 1 ? ` \u00b7 ${lastFix.samples} readings` : '');
     const placeEl = root.querySelector('[data-c-place]');
     if (echo.place_label) placeEl.textContent = echo.place_label;
-    else if (navigator.onLine === false) placeEl.textContent = 'Unnamed spot';
+    else if (navigator.onLine === false || echo.blurred) placeEl.textContent = 'Unnamed spot';
     else { placeEl.textContent = '\u2026'; placeLabel({ lat: echo.lat, lng: echo.lng }).then((l) => { placeEl.textContent = l || 'Unnamed spot'; }).catch(() => { placeEl.textContent = 'Unnamed spot'; }); }
     const q = Boolean(echo.queued);
     const sealed = echo.unlock_at || (q && echo.unlockAt);

@@ -99,7 +99,7 @@
   animation: sweep 2.4s linear infinite; }
 @keyframes sweep { to { transform: rotate(360deg); } }
 .rec-lock h2, .rec-spot h2 { text-align: left; }
-.spot-map { position: relative; height: min(46vh, 360px); border-radius: 22px; overflow: hidden; border: 1px solid var(--line-2); margin: 4px 0 12px; background: #0a0c11; }
+.spot-map { position: relative; height: min(40vh, 330px); border-radius: 22px; overflow: hidden; border: 1px solid var(--line-2); margin: 4px 0 12px; background: #0a0c11; }
 .spot-pin { width: 40px; height: 52px; cursor: grab; touch-action: none; }
 .spot-pin i { position: absolute; left: 50%; bottom: 0; width: 26px; height: 26px; transform: translate(-50%, -14px) rotate(-45deg); border-radius: 50% 50% 50% 0;
   background: radial-gradient(circle at 40% 40%, #fff, #cfe6f2 60%, #8fd3e8); box-shadow: 0 0 22px rgba(143,211,232,.8), 0 6px 14px rgba(0,0,0,.6); }
@@ -110,3 +110,36 @@
 .btn.undo i { font-style: normal; font-variant-numeric: tabular-nums; opacity: .8; }
 .undo-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--warm); transform-origin: left; }
 @media (prefers-reduced-motion: reduce) { .lock-sweep { animation: none; } }
+
+/* ---------------------------------------------------------------- v6: place context on the confirm pin */
+.spot-place { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+.place-chip { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; max-width: 100%; padding: 6px 12px 6px 10px; border-radius: 999px;
+  font-size: 13.5px; font-weight: 600; color: var(--ink, #e8ecf4); background: rgba(143,211,232,.1); box-shadow: inset 0 0 0 1px rgba(143,211,232,.3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.place-chip::before { content: ''; flex: none; width: 16px; height: 16px; background: currentColor; opacity: .9;
+  -webkit-mask: var(--pi) center / contain no-repeat; mask: var(--pi) center / contain no-repeat; }
+.place-chip, .near-place, .card-place, .hunt-place { --pi: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='10' r='4' fill='black'/%3E%3Cpath d='M12 22s7-6.5 7-12a7 7 0 10-14 0c0 5.5 7 12 7 12z' fill='none' stroke='black' stroke-width='2'/%3E%3C/svg%3E"); }
+[data-kind="indoor"] { --pi: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 21V8l9-5 9 5v13h-6v-6H9v6z' fill='black'/%3E%3C/svg%3E"); }
+[data-kind="road"] { --pi: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 2L4 22h5l1-6h4l1 6h5L16 2h-3l.5 4h-3L11 2z' fill='black'/%3E%3C/svg%3E"); }
+[data-kind="park"] { --pi: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2l6 9h-3l4 6h-6v5h-2v-5H5l4-6H6z' fill='black'/%3E%3C/svg%3E"); }
+.place-chip[data-kind="indoor"] { color: #bfefff; background: rgba(0,229,255,.1); box-shadow: inset 0 0 0 1px rgba(0,229,255,.38); }
+.place-chip[data-kind="road"] { color: #ffd5a8; background: rgba(255,170,90,.12); box-shadow: inset 0 0 0 1px rgba(255,170,90,.45); }
+.place-chip[data-kind="park"] { color: #b9f3cf; background: rgba(90,220,150,.1); box-shadow: inset 0 0 0 1px rgba(90,220,150,.35); }
+.place-chip[data-kind="checking"] { color: var(--muted); }
+.place-chip[data-kind="checking"]::before { animation: chipPulse 1s ease-in-out infinite alternate; }
+.place-chip[data-kind="unknown"] { color: var(--muted); background: rgba(255,255,255,.04); box-shadow: inset 0 0 0 1px var(--line); }
+@keyframes chipPulse { from { opacity: .25; } to { opacity: 1; } }
+.spot-place .btn.small { min-height: 44px; }
+.spot-warn { margin: 0 0 8px; padding: 9px 12px; border-radius: 14px; font-size: 13.5px; line-height: 1.35; color: #ffd5a8;
+  background: rgba(255,150,60,.1); box-shadow: inset 0 0 0 1px rgba(255,150,60,.35); }
+.floor { border: 0; padding: 0; margin: 0 0 8px; min-width: 0; }
+.floor legend { padding: 0; margin-bottom: 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.floor legend small { text-transform: none; letter-spacing: 0; font-weight: 500; opacity: .8; }
+.floor .chip-btn { min-width: 48px; align-items: center; font-weight: 700; }
+.spot-pin .pin-warn { position: absolute; left: 50%; bottom: 58px; transform: translateX(-50%); white-space: nowrap; padding: 5px 9px; border-radius: 10px;
+  font: 700 12px/1.1 system-ui, sans-serif; color: #1a0f05; background: #ffb066; box-shadow: 0 6px 18px rgba(255,140,40,.45);
+  animation: pinWarn 1.6s ease-in-out infinite; pointer-events: none; }
+.spot-pin .pin-warn::after { content: ''; position: absolute; left: 50%; bottom: -5px; width: 10px; height: 10px; transform: translateX(-50%) rotate(45deg); background: #ffb066; }
+.spot-pin .pin-warn[hidden] { display: none; }
+@keyframes pinWarn { 0%, 100% { transform: translateX(-50%) translateY(0); } 50% { transform: translateX(-50%) translateY(-3px); } }
+@media (prefers-reduced-motion: reduce) { .spot-pin .pin-warn, .place-chip[data-kind="checking"]::before { animation: none; } }

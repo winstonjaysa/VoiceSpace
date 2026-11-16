@@ -371,3 +371,19 @@ svg { display: block; }
 .drawer[data-snap="0"] .drawer-body { opacity: 0; pointer-events: none; }
 .recenter { min-height: 44px; }
 .drawer-open .recenter { opacity: 0; pointer-events: none; }
+
+/* ---------------------------------------------------------------- v6: place context (card, nearby list, hunt) */
+.card-place, .near-place, .hunt-place { display: inline-flex; align-items: center; gap: 6px; font-style: normal; }
+.card-place::before, .near-place::before, .hunt-place::before { content: ''; flex: none; width: 14px; height: 14px; background: currentColor;
+  -webkit-mask: var(--pi) center / contain no-repeat; mask: var(--pi) center / contain no-repeat; }
+.card-place { margin-top: 6px; padding: 4px 10px 4px 8px; border-radius: 999px; font-size: 12.5px; font-weight: 600; color: #bfefff;
+  background: rgba(0,229,255,.09); box-shadow: inset 0 0 0 1px rgba(0,229,255,.3); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-place[data-kind="road"] { color: #ffd5a8; background: rgba(255,170,90,.1); box-shadow: inset 0 0 0 1px rgba(255,170,90,.38); }
+.card-place[data-kind="park"] { color: #b9f3cf; background: rgba(90,220,150,.09); box-shadow: inset 0 0 0 1px rgba(90,220,150,.32); }
+.card-place[data-kind="outdoor"] { color: var(--ink-2, #c9d0de); background: rgba(255,255,255,.05); box-shadow: inset 0 0 0 1px var(--line); }
+.near-place { display: flex; margin-top: 2px; font-size: 12px; color: #9fdcef; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.near-place[data-kind="road"] { color: #f1c9a0; } .near-place[data-kind="park"] { color: #a9e8c2; }
+.hunt-place { display: flex; justify-content: center; text-align: left; margin: 6px auto 0; max-width: 34em; padding: 9px 14px; border-radius: 14px;
+  font-size: 13.5px; line-height: 1.35; color: #cdf4ff; background: rgba(0,229,255,.08); box-shadow: inset 0 0 0 1px rgba(0,229,255,.28); }
+.hunt-place[hidden] { display: none; }
+.hunt-place::before { width: 16px; height: 16px; }

@@ -3,6 +3,7 @@
 //   record button -> record sheet (js/record.js) · tap a glow -> card -> "Walk to it" -> hunt (js/listen.js)
 import * as store from './echo-store.js';
 import { createMapView } from './map.js';
+import { echoPlace, placeSentence } from './place.js';
 import { createMapFeed } from './map-feed.js';
 import { mountRecordScreen } from './record.js';
 import { openHunt, fmtDist } from './listen.js';
@@ -30,7 +31,7 @@ let view = null, feed = null, me = null, geoWatch = null, followMe = true, cardI
 let viewportCount = 0, lastRawFix = null, compassHeading = null, compassAt = 0, gpsCourse = null, lastFollowAt = 0;
 
 // ------------------------------------------------------------------ formatting
-const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : /o$/.test(w) ? 'es' : 's'}`;
 function ago(iso) {
   if (!iso) return '—';
   const m = Math.max(0, (Date.now() - Date.parse(iso)) / 60000);
@@ -125,6 +126,13 @@ function setFollow(on) {
 }
 
 let geoErrShown = false;
+// fly-in once per page load, at the first fix (or as soon as the map is ready after it)
+let introDone = false, introUntil = 0;
+function runIntro() {
+  if (introDone || !view?.ready || !me) return;
+  introDone = true; introUntil = Date.now() + (fxReduced() ? 0 : 3000);
+  view.intro(me);
+}
 function startGeo() {
   if (geoWatch != null || !('geolocation' in navigator)) {
     if (!('geolocation' in navigator)) setGps('off', 'No GPS', 'This device has no location support');
@@ -144,8 +152,8 @@ function startGeo() {
     geoErrShown = false;
     if (first) setFollow(followMe);
     if (view?.ready && followMe && !cardId && !body.classList.contains('has-overlay')) {
-      if (first) view.jumpTo(me, Math.max(15.5, view.map.getZoom()));
-      else if (Date.now() - lastFollowAt > 1200) { lastFollowAt = Date.now(); view.follow(me); }
+      if (!introDone) runIntro();
+      else if (Date.now() - lastFollowAt > 1200 && Date.now() > introUntil) { lastFollowAt = Date.now(); view.follow(me); }
     }
     if (cardId) renderCard(cardId);
     if (trailWalk) trailWalk.update(me);
@@ -180,7 +188,7 @@ function updateLive(st = feed?.status()) {
 
 // ------------------------------------------------------------------ echo card
 function closeCard() {
-  cardId = null; els.card.dataset.shape = ''; els.card.classList.remove('open');
+  cardId = null; els.card.dataset.shape = ''; els.card.classList.remove('open'); view?.select?.(null);
   setTimeout(() => { if (!cardId) els.card.hidden = true; }, reducedMotion ? 0 : 280);
 }
 const fmtLen = (e) => { const ms = e.duration_ms || opened.durationMs(e.id); if (!ms) return '\u2014'; const t = Math.round(ms / 1000); return `0:${String(t).padStart(2, '0')}`; };
@@ -194,13 +202,15 @@ function renderCard(id) {
   const where = d == null ? (blurred ? 'Somewhere in this glow' : 'Pinned right here')
     : blurred ? (d < 30 ? 'You\u2019re inside the glow' : `~${fmtDist(d)} away`)
       : d < 12 ? 'You\u2019re right on it' : `${fmtDist(d)} away`;
-  const place = e.place_label ? ` near ${esc(e.place_label)}` : '';
+  const pl = echoPlace(e);
   const note = queued ? 'Waiting for a connection. It uploads by itself as soon as you\u2019re back online.'
-    : blurred ? `Blurred by its author: the spot is somewhere inside the ${Math.round(blurR(e))} m glow${place}. Walk there and listen for it.`
-      : `Pinned exactly here${place}. Walk to the pin and listen.`;
+    : blurred ? `Blurred by its author: the spot is somewhere inside the ${Math.round(blurR(e))} m glow${pl?.text ? ` (${esc(pl.text.toLowerCase())})` : ''}. Walk there and listen for it.`
+      : pl?.kind === 'indoor' && pl.name ? esc(placeSentence(pl))
+        : `Pinned exactly here${pl?.text ? ` \u00b7 ${esc(pl.text)}` : ''}. Walk to the pin and listen.`;
+  const placeHtml = pl?.text ? `<span class="card-place" data-kind="${pl.kind}">${esc(pl.text)}</span>` : '';
   const lifeFrac = Math.max(0, Math.min(1, (Date.parse(e.expires_at) - Date.now()) / (24 * 3600e3)));
   // Same echo already shown: patch text in place so a tap in progress (or an open thread) survives GPS/feed updates.
-  const shape = `${id}|${queued}|${Boolean(e.mine)}|${v2On()}|${blurred}`;
+  const shape = `${id}|${queued}|${Boolean(e.mine)}|${v2On()}|${blurred}|${pl?.text || ''}`;
   if (els.card.dataset.shape === shape && els.card.querySelector('.card-head')) {
     const set = (sel, v, attr) => { const n = els.card.querySelector(sel); if (n && (attr ? n.getAttribute(attr) : n.innerHTML) !== v) attr ? n.setAttribute(attr, v) : (n.innerHTML = v); };
     set('.card-title .eyebrow', `${e.mine ? 'Your echo' : opened.isOpened(e.id) ? 'Echo \u00b7 opened' : '\u{1F352} Unopened'} · ${queued ? '<span class="tag-queued">Queued, will upload</span>' : heatWord(res)}${blurred ? ' · Blurred' : ''}`);
@@ -225,6 +235,7 @@ function renderCard(id) {
       <div class="card-title">
         <span class="eyebrow">${e.mine ? 'Your echo' : opened.isOpened(e.id) ? 'Echo \u00b7 opened' : '\u{1F352} Unopened'} · ${queued ? '<span class="tag-queued">Queued, will upload</span>' : heatWord(res)}${blurred ? ' · Blurred' : ''}</span>
         <strong>${where}</strong>
+        ${placeHtml}
       </div>
       <button class="icon-btn" data-card-close aria-label="Close echo details"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </header>
@@ -321,7 +332,7 @@ els.trailwalk.addEventListener('click', (ev) => {
 });
 
 function openCard(id) {
-  cardId = id; renderCard(id); haptic('tick'); opened.markSeen([id]); updateDrawer();
+  cardId = id; renderCard(id); haptic('tick'); opened.markSeen([id]); updateDrawer(); view?.select?.(id);
   const e = feed.get(id);
   setFollow(false);
   // keep the glow visible above the sheet
@@ -560,6 +571,7 @@ async function boot() {
     onMove: (b) => { feed.setBounds(b); },
     onReady: () => {
       if (me) view.setMe(me); view.setEchoes(feed.list());
+      if (me && followMe) runIntro();
       els.skeleton?.classList.add('done'); setTimeout(() => els.skeleton?.remove(), 700);
     },
     onUserPan: () => setFollow(false),
@@ -675,10 +687,11 @@ function renderDrawer() {
     const plays = Number.isFinite(e.listen_count) ? ` \u00b7 \u25B6 ${e.listen_count}` : '';
     const len = fmtLen(e);
     return `<button class="near-row${unopened ? ' is-unopened' : ''}" role="listitem" data-near="${esc(e.id)}"
-        aria-label="${unopened ? 'Unopened echo' : e.mine ? 'Your echo' : 'Opened echo'}, ${blurR(e) ? 'about ' : ''}${fmtDist(d)} away, ${len !== '\u2014' ? `${len} long, ` : ''}dropped ${esc(ago(e.created_at))}, fades in ${esc(left(e.expires_at))}">
+        aria-label="${unopened ? 'Unopened echo' : e.mine ? 'Your echo' : 'Opened echo'}, ${blurR(e) ? 'about ' : ''}${fmtDist(d)} away, ${len !== '\u2014' ? `${len} long, ` : ''}dropped ${esc(ago(e.created_at))}, fades in ${esc(left(e.expires_at))}${echoPlace(e)?.text ? `, ${esc(echoPlace(e).text)}` : ''}">
       <span class="nr-ico" aria-hidden="true">${unopened ? '\u{1F352}' : '<i></i>'}</span>
       <span class="nr-main"><strong>${blurR(e) ? '~' : ''}${fmtDist(d)} <svg class="nr-arrow" viewBox="0 0 24 24" style="transform:rotate(${rel.toFixed(0)}deg)" aria-hidden="true"><path d="M12 3l6 16-6-4-6 4z"/></svg></strong>
-        <small>${len !== '\u2014' ? `${len} \u00b7 ` : ''}${esc(ago(e.created_at))} \u00b7 fades in ${esc(left(e.expires_at))}${plays}</small></span>
+        <small>${len !== '\u2014' ? `${len} \u00b7 ` : ''}${esc(ago(e.created_at))} \u00b7 fades in ${esc(left(e.expires_at))}${plays}</small>
+        ${(() => { const p = echoPlace(e); return p?.text ? `<em class="near-place" data-kind="${p.kind}">${esc(p.text)}</em>` : ''; })()}</span>
       <span class="nr-state">${e.mine ? 'Yours' : e.queued ? 'Queued' : unopened ? (isNew ? 'New' : 'Unopened') : 'Opened'}</span>
     </button>`;
   });
