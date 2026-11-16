@@ -152,3 +152,12 @@ Copied verbatim from trax (`/home/box/shared/echolocation/v2/trax/`); edit there
 - Android/desktop Chrome: an **Install app** pill appears (beforeinstallprompt). iPhone Safari: the pill opens a "Share → Add to Home Screen" hint. Both are hidden when running installed.
 - The service worker precaches the shell file by file and serves `index.html` for navigations when offline.
 - PNG icons are committed as base64 text in `icons/src/` (the repo is updated through a text-only API); `.github/workflows/pwa-icons.yml` decodes them into `icons/*.png`, checks SHA256SUMS, commits, and asks Pages to rebuild.
+
+## v5: precise spot, cherries, nearby drawer, first run (v5.0.0)
+
+- **Dropping**: Drop → *Locking your spot* (live ±m meter; waits up to 15 s for a reading ≤ 15 m) → *Confirm your spot* mini-map with a draggable pin (snaps back if moved > 100 m from the fix; a weak fix must be confirmed with "Yes, I'm here") → drop, with a 5 s **Undo** that returns to the review with the recording kept. The stored `accuracy_m` is the final fix's.
+- **Unopened echoes** (not yet heard on this device; tracked in localStorage by `js/opened.js`) are glowing, pulsing 🍒 cherry pins; opened ones are the normal pin. Opening one plays a cherry burst and counts toward "N found · streak".
+- **Nearby drawer**: a pull-up sheet (drag or tap the handle) listing echoes within 3 km by distance, with direction arrow, length, age, time left, plays and opened state; "N new" badge; tap a row to fly there.
+- **Card**: length (server `duration_s`, or read from the audio metadata after unlocking) and plays (`listen_count`, migration-v2; "—" before it). `backend/migrations/003_map_echoes_duration.sql` (run after migration-v2) adds `duration_s` to `map_echoes`.
+- **First run**: 3 swipeable cards asking for location and microphone in context. Every error toast has a next step (Retry / How to fix / Reload); empty states invite a drop.
+- **Motion**: spring sheets, pin drop-in, ripples, row entrances, haptics (`navigator.vibrate`, Android); transforms/opacity only; all off under prefers-reduced-motion.
