@@ -195,6 +195,36 @@ svg { display: block; }
   background-size: 200% 100%; animation: shimmer 1.3s linear infinite; }
 .tag-queued { color: var(--warm); }
 
+/* ---------------------------------------------------------------- v4: replies, threads, trails */
+.btn.small { min-height: 44px; padding: 0 14px; font-size: 13.5px; border-radius: 14px; }
+.btn[aria-disabled="true"] { opacity: .6; }
+.v2-row { flex-wrap: wrap; margin: 0 0 10px; }
+.v2-row .v2-hint { flex-basis: 100%; }
+.v2-hint { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
+.thread { margin: 0 0 12px; }
+.thread ol, .trail-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.thread-item { width: 100%; min-height: 44px; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 0 14px;
+  border-radius: 12px; border: 1px solid var(--line); background: rgba(255,255,255,.035); font-size: 13.5px; cursor: pointer; }
+.thread-item span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+.about h3 { margin: 4px 0 6px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+.about-trails { border-top: 1px solid var(--line); padding-top: 12px; margin-bottom: 12px; }
+.about-trails .row { margin: 8px 0; flex-wrap: wrap; }
+.trail-new { display: flex; gap: 8px; }
+.trail-new input { flex: 1; min-width: 0; min-height: 44px; padding: 0 14px; border-radius: 14px; border: 1px solid var(--line-2);
+  background: rgba(255,255,255,.04); color: var(--ink); font: inherit; font-size: 14px; }
+.trail-new input:focus-visible { outline: 2px solid var(--ice); outline-offset: 1px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.about { max-height: calc(100% - 90px - var(--safe-t)); overflow-y: auto; }
+.trailwalk { position: fixed; z-index: 3; left: 10px; right: 10px; bottom: calc(110px + var(--safe-b)); border-radius: 22px; padding: 14px 16px 12px;
+  border: 1px solid var(--line-2); }
+.trailwalk[data-arrived="1"] { box-shadow: 0 0 0 1px rgba(143,227,184,.5), 0 10px 40px rgba(143,227,184,.15); }
+.tw-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.tw-head strong { display: block; font-size: 16px; font-weight: 600; }
+.tw-place { display: block; font-size: 12.5px; color: var(--muted); }
+.tw-arrow { width: 34px; height: 34px; flex: none; fill: var(--ice); filter: drop-shadow(0 0 10px rgba(143,211,232,.6)); transition: transform .4s var(--ease); }
+.trailwalk .row { margin-top: 10px; }
+.has-overlay .trailwalk { opacity: 0; pointer-events: none; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition-duration: 0s !important; }
 }
