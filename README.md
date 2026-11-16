@@ -17,6 +17,7 @@ No build step: plain HTML/CSS and ES modules. All paths are relative, so it work
 | `js/map-feed.js` | Live echo list: polls the viewport every 5 s + Supabase Realtime broadcast topic `echo-map` (`drop` / `update` / `gone`). Broadcasts are hints; polls confirm them |
 | `js/fuzz.js` | Client-side fuzz (fallback until migration 002 runs): deterministic per echo id |
 | `js/echo-store.js` `mapEchoes()` | `map_echoes` RPC (server fuzz) when present, else `debug_echoes` / `nearby_echoes` + client fuzz. Re-checks for the RPC every minute |
+| `js/precise-fix.js` | Cooker's drop-time GPS lock: 3–8 s of fresh fixes, weak ones and multipath jumps dropped, accuracy-weighted average (~3.5 m vs 27 m in `tests/precise-fix.test.mjs`). Used by **Drop here** and, as a ~3 s lock, for the hunt's server unlock/resonate gates. `placeLabel()` names the spot via Nominatim (Photon fallback), no key |
 | `js/listen.js` | Hunt overlay. "Walk to it" hunts only the chosen echo (500 m search radius); beyond that it points at the glow |
 | `backend/migrations/002_map_realtime.sql` | Paste once into the Supabase SQL editor: secret-salted server-side fuzz, `map_echoes(min_lat, min_lng, max_lat, max_lng)`, and a trigger that broadcasts fuzzed changes on `echo-map` |
 
