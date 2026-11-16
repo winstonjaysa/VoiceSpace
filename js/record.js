@@ -9,7 +9,15 @@ import * as store from './echo-store.js';
 import { createLiveTranscript, capsulePresets, opensIn, canReplyHere, replyTo as replyToEcho, dropOnTrail } from './v2/index.js';
 const { dropEcho } = store;
 import { MAX_RECORD_MS, GPS_GOOD_ACCURACY_M } from './config.js';
-import { preciseFix, placeLabel } from './precise-fix.js';
+import { preciseFix, placeLabel, distM } from './precise-fix.js';
+import { STYLES } from './map.js';
+import { haptic, spring } from './fx.js';
+import { setDuration } from './opened.js';
+
+const LOCK_WINDOW_MS = 15000;     // wait up to 15 s for a good fix
+const LOCK_TARGET_M = 15;         // ... at or under 15 m
+const SPOT_MAX_MOVE_M = 100;      // the confirm-your-spot pin can move this far from the fix, no more
+const UNDO_MS = 5000;
 
 const RING_R = 92;
 const RING_C = 2 * Math.PI * RING_R;
@@ -79,6 +87,30 @@ const TEMPLATE = `
     </div>
   </div>
 
+  <div class="rec-lock" data-lock hidden role="status" aria-live="polite">
+    <div class="lock-meter" aria-hidden="true">
+      <svg viewBox="0 0 200 200"><circle class="ring-bg" cx="100" cy="100" r="88"/>
+        <circle class="lock-ring" data-lock-ring cx="100" cy="100" r="88" stroke-dasharray="553" stroke-dashoffset="553" transform="rotate(-90 100 100)"/></svg>
+      <div class="lock-read"><strong data-lock-acc>…</strong><small data-lock-sub>finding you</small></div>
+      <span class="lock-sweep"></span>
+    </div>
+    <p class="eyebrow">Locking your spot</p>
+    <h2 data-lock-title>Hold still a moment</h2>
+    <p class="lede" data-lock-note>Waiting for a reading within ${LOCK_TARGET_M} m. Near a window or outside is fastest.</p>
+    <div class="row"><button class="btn" data-lock-cancel>Back</button><button class="btn" data-lock-skip hidden>Use best so far</button></div>
+  </div>
+
+  <div class="rec-spot" data-spot hidden>
+    <p class="eyebrow">Confirm your spot</p>
+    <h2 data-spot-title>Is the pin where you are?</h2>
+    <div class="spot-map" data-spot-map role="application" aria-label="Map: drag the pin onto the exact spot where you are"></div>
+    <p class="spot-note" data-spot-note role="status"></p>
+    <div class="row">
+      <button class="btn" data-spot-relock>Re-lock</button>
+      <button class="btn primary" data-spot-ok>Drop here</button>
+    </div>
+  </div>
+
   <div class="rec-confirm" data-confirm hidden>
     <div class="ripple" aria-hidden="true"><span></span><span></span><span></span></div>
     <p class="eyebrow" data-c-eyebrow>Dropped</p>
@@ -92,6 +124,7 @@ const TEMPLATE = `
       <dt>Fades</dt><dd data-c-exp></dd>
     </dl>
     <p class="muted small" data-c-note>It fades in 24 h unless listeners resonate with it.</p>
+    <button class="btn undo" data-undo hidden><span>Undo</span><i data-undo-n></i><b class="undo-bar" data-undo-bar></b></button>
     <div class="row">
       <button class="btn" data-another>Record another</button>
       <button class="btn primary" data-see>See it on the map</button>
@@ -121,7 +154,7 @@ export function pickMimeType() {
 
 /** mountRecordScreen(root, { onClose, onDropped, autoStart, onToast }). autoStart: call it inside a tap to skip the gate. */
 export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => {}, autoStart = false, onToast = () => {},
-  replyTo = null, activeTrail = null } = {}) {
+  replyTo = null, activeTrail = null, onHelp = () => {} } = {}) {
   const v2 = () => store.mapMode === 'map_echoes';
   root.innerHTML = TEMPLATE;
   const $ = (s) => root.querySelector(s);
@@ -135,6 +168,11 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     transcript: $('[data-transcript]'), tags: $('[data-tags]'), capsule: $('[data-capsule]'), chips: $('[data-capsule-chips]'),
     capsuleHint: $('[data-capsule-hint]'), trailRow: $('[data-trail-row]'), trail: $('[data-trail]'), trailName: $('[data-trail-name]'),
     replyBanner: $('[data-reply-banner]'),
+    lock: $('[data-lock]'), lockRing: $('[data-lock-ring]'), lockAcc: $('[data-lock-acc]'), lockSub: $('[data-lock-sub]'),
+    lockTitle: $('[data-lock-title]'), lockNote: $('[data-lock-note]'), lockCancel: $('[data-lock-cancel]'), lockSkip: $('[data-lock-skip]'),
+    spot: $('[data-spot]'), spotMap: $('[data-spot-map]'), spotNote: $('[data-spot-note]'), spotTitle: $('[data-spot-title]'),
+    spotOk: $('[data-spot-ok]'), spotRelock: $('[data-spot-relock]'),
+    undo: $('[data-undo]'), undoN: $('[data-undo-n]'), undoBar: $('[data-undo-bar]'),
     confirm: $('[data-confirm]'), another: $('[data-another]'), close: $('[data-close]'), see: $('[data-see]'),
   };
   let lastEcho = null, lastFix = null;
@@ -153,6 +191,8 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     el.main.hidden = !['ready', 'recording', 'review'].includes(p);
     el.review.hidden = p !== 'review';
     el.confirm.hidden = p !== 'dropped';
+    el.lock.hidden = p !== 'locking';
+    el.spot.hidden = p !== 'spot';
     el.rec.disabled = p === 'review';
     el.rec.setAttribute('aria-pressed', String(p === 'recording'));
     if (p === 'ready') {
@@ -194,10 +234,13 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
       setupMeter();
     } catch (err) {
       el.enable.disabled = false;
-      el.gateErr.textContent = err?.name === 'NotAllowedError'
-        ? 'Microphone permission was denied. Allow it in your browser settings and try again.'
-        : `Microphone unavailable: ${err?.message || err}`;
-      onToast(el.gateErr.textContent);
+      const denied = err?.name === 'NotAllowedError';
+      el.gateErr.textContent = denied ? 'The microphone is blocked. ' : `Microphone unavailable: ${err?.message || err}. `;
+      const fix = document.createElement('button'); fix.className = 'link-btn';
+      fix.textContent = denied ? 'Show me how to allow it' : 'Try again';
+      fix.addEventListener('click', () => (denied ? onHelp('mic') : el.enable.click()));
+      el.gateErr.append(fix);
+      el.enable.textContent = 'Try again';
       return;
     }
 
@@ -425,60 +468,166 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     }
   }
 
-  el.drop.addEventListener('click', async () => {
-    if (!s.blob || !s.fix || s.dropping) return;
-    s.dropping = true; updateDropButton();
-    // Precise lock (Cooker's precise-fix.js): 3–8 s of fresh fixes, weak ones and multipath jumps dropped,
-    // accuracy-weighted average. Falls back to the live fix if the lock can't do better.
-    let fix = s.fix;
-    s.locking = true; el.drop.textContent = 'Locking position\u2026';
-    el.warn.textContent = 'Hold still for a few seconds while we pin the exact spot.';
-    // street label for the echo (stored as place_label after migration-v2); looked up in parallel with the lock
-    const labelP = navigator.onLine === false ? Promise.resolve(null)
-      : placeLabel({ lat: s.fix.lat, lng: s.fix.lng }).catch(() => null);
+  // Drop = 1) lock: wait up to 15 s for a reading at or under 15 m, with a live ±m meter;
+  //        2) confirm your spot: a mini-map with a draggable pin (max 100 m from the fix), so the echo lands exactly where you are;
+  //        3) drop, with 5 s to undo. The stored accuracy is the final fix's. A weak fix is only used after the user confirms the pin.
+  let lockRun = 0, spotMap = null, spotPin = null, spotFix = null, labelP = null;
+  el.drop.addEventListener('click', () => { if (s.blob && s.fix && !s.dropping) startLock(); });
+  el.lockCancel.addEventListener('click', () => { lockRun++; s.locking = false; setPhase('review'); updateDropButton(); });
+  el.lockSkip.addEventListener('click', () => { if (s.lockBest) { lockRun++; showSpot(s.lockBest); } });
+  el.spotRelock.addEventListener('click', () => startLock());
+  el.spotOk.addEventListener('click', () => commitDrop());
+
+  async function startLock() {
+    const run = ++lockRun; s.locking = true; s.lockBest = null;
+    setPhase('locking'); haptic('tap');
+    el.lockSkip.hidden = true; el.lockTitle.textContent = 'Hold still a moment';
+    el.lockNote.textContent = `Waiting for a reading within ${LOCK_TARGET_M} m. Near a window or outside is fastest.`;
+    const t0 = performance.now();
+    const ringTick = () => {
+      if (run !== lockRun || s.phase !== 'locking') return;
+      const k = Math.min(1, (performance.now() - t0) / LOCK_WINDOW_MS);
+      el.lockRing.style.strokeDashoffset = String(553 * (1 - k));
+      requestAnimationFrame(ringTick);
+    };
+    requestAnimationFrame(ringTick);
+    const show = (acc, n) => {
+      el.lockAcc.textContent = `\u00b1${acc} m`; el.lockSub.textContent = `${n} reading${n === 1 ? '' : 's'}`;
+      el.lock.dataset.q = acc <= LOCK_TARGET_M ? 'good' : acc <= 30 ? 'ok' : 'weak';
+    };
+    if (s.fix) show(Math.round(s.fix.accuracy), 0);
+    setTimeout(() => { if (run === lockRun && s.phase === 'locking' && s.lockBest) el.lockSkip.hidden = false; }, 5000);
+    labelP = navigator.onLine === false ? Promise.resolve(null) : placeLabel({ lat: s.fix.lat, lng: s.fix.lng }).catch(() => null);
+    let fix = null;
     try {
-      const p = await preciseFix({ windowMs: 8000, targetM: 6, minSamples: 3, maxAccuracyM: 30, fallbackMs: 4000,
+      const p = await preciseFix({ windowMs: LOCK_WINDOW_MS, targetM: LOCK_TARGET_M, minSamples: 2, maxAccuracyM: 100, fallbackMs: LOCK_WINDOW_MS + 1000,
         seed: s.fix ? { lat: s.fix.lat, lng: s.fix.lng, accuracy: s.fix.accuracy, ts: s.fix.ts } : null,
-        onProgress: (q) => { el.drop.textContent = `Locking \u00b1${q.accuracy} m \u00b7 ${q.samples} reading${q.samples === 1 ? '' : 's'}`; } });
-      if (p && (!Number.isFinite(fix.accuracy) || p.accuracy <= fix.accuracy || p.samples >= 3)) {
-        fix = { lat: p.lat, lng: p.lng, accuracy: p.accuracy, altitude: s.fix.altitude, ts: p.at, samples: p.samples,
-          precise: !p.single, lowConfidence: Boolean(p.lowConfidence) };
+        onProgress: (q) => {
+          show(q.accuracy, q.samples);
+          if (s.fix) s.lockBest = { lat: s.fix.lat, lng: s.fix.lng, accuracy: s.fix.accuracy, samples: q.samples, lowConfidence: q.accuracy > LOCK_TARGET_M };
+        } });
+      fix = { lat: p.lat, lng: p.lng, accuracy: p.accuracy, samples: p.samples, single: Boolean(p.single),
+        lowConfidence: p.accuracy > LOCK_TARGET_M || Boolean(p.single && p.accuracy > LOCK_TARGET_M) };
+    } catch (e) {
+      if (run !== lockRun) return;
+      if (e.message === 'location-denied') {
+        el.lockTitle.textContent = 'Location is off';
+        el.lockNote.textContent = 'Turn on Location for this site in your browser settings, then tap Re-lock. Your recording is kept.';
+      } else if (s.fix) fix = { lat: s.fix.lat, lng: s.fix.lng, accuracy: s.fix.accuracy, samples: 1, single: true, lowConfidence: true };
+      else {
+        el.lockTitle.textContent = 'No GPS reading yet';
+        el.lockNote.textContent = 'Step outside or near a window and try again. Your recording is kept.';
       }
-    } catch (e) { console.info('[record] precise lock unavailable, using live fix:', e.message); }
+      if (!fix) { el.lockSkip.hidden = true; el.lockCancel.textContent = 'Back'; s.locking = false; return; }
+    }
+    if (run !== lockRun) return;
     s.locking = false;
-    el.drop.textContent = 'Dropping\u2026';
-    const place = await Promise.race([labelP, new Promise((r) => setTimeout(() => r(null), 1500))]);
+    showSpot(fix);
+  }
+
+  function showSpot(fix) {
+    spotFix = fix; setPhase('spot'); haptic(fix.lowConfidence ? 'warn' : 'success');
+    const acc = Math.round(fix.accuracy);
+    el.spotTitle.textContent = fix.lowConfidence ? 'Weak signal: check the pin' : 'Is the pin where you are?';
+    el.spotOk.textContent = fix.lowConfidence ? 'Yes, I\u2019m here' : 'Drop here';
+    el.spotNote.dataset.q = fix.lowConfidence ? 'weak' : 'good';
+    el.spotNote.textContent = fix.lowConfidence
+      ? `GPS is only good to \u00b1${acc} m here. Drag the pin onto your exact spot (up to ${SPOT_MAX_MOVE_M} m), then confirm.`
+      : `Locked to \u00b1${acc} m${fix.samples > 1 ? ` from ${fix.samples} readings` : ''}. Drag the pin if it\u2019s off.`;
+    const ml = window.maplibregl;
+    if (!ml) { el.spotMap.hidden = true; return; }        // map library missing: the confirm button still works
+    el.spotMap.hidden = false;
+    if (!spotMap) {
+      spotMap = new ml.Map({ container: el.spotMap, style: STYLES[0].url, center: [fix.lng, fix.lat], zoom: 18, attributionControl: false,
+        dragRotate: false, pitchWithRotate: false, maxPitch: 0, fadeDuration: 0 });
+      spotMap.touchZoomRotate.disableRotation();
+      root.__spotMap = spotMap;                         // tests
+      spotMap.on('styleimagemissing', (e) => { if (!spotMap.hasImage(e.id)) spotMap.addImage(e.id, { width: 1, height: 1, data: new Uint8Array(4) }); });
+      spotMap.on('error', (e) => console.info('[spot-map]', e?.error?.message || e));
+      const elPin = document.createElement('div'); elPin.className = 'spot-pin'; elPin.innerHTML = '<i></i>';
+      elPin.setAttribute('aria-label', 'Your spot'); elPin.setAttribute('role', 'img');
+      spotPin = new ml.Marker({ element: elPin, draggable: true, anchor: 'bottom' }).setLngLat([fix.lng, fix.lat]).addTo(spotMap);
+      spotPin.on('dragstart', () => haptic('tick'));
+      spotPin.on('dragend', onPinDragEnd);
+      spotMap.on('load', () => { addAccCircle(); spotMap.resize(); });
+    } else {
+      spotPin.setLngLat([fix.lng, fix.lat]); spotMap.jumpTo({ center: [fix.lng, fix.lat], zoom: 18 }); addAccCircle();
+      requestAnimationFrame(() => spotMap.resize());
+    }
+    root.dataset.spotMoved = '0';
+  }
+  function circleGeo({ lat, lng }, r) {
+    const pts = []; for (let i = 0; i <= 48; i++) { const a = (i / 48) * 2 * Math.PI;
+      pts.push([lng + (r * Math.sin(a)) / (111320 * Math.cos(lat * Math.PI / 180)), lat + (r * Math.cos(a)) / 110540]); }
+    return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [pts] }, properties: {} };
+  }
+  function addAccCircle() {
+    if (!spotMap?.isStyleLoaded?.() || !spotFix) return;
+    const data = { type: 'FeatureCollection', features: [circleGeo(spotFix, Math.max(5, spotFix.accuracy)), circleGeo(spotFix, SPOT_MAX_MOVE_M)] };
+    data.features[1].properties.limit = 1;
+    if (spotMap.getSource('acc')) { spotMap.getSource('acc').setData(data); return; }
+    spotMap.addSource('acc', { type: 'geojson', data });
+    spotMap.addLayer({ id: 'acc-fill', type: 'fill', source: 'acc', filter: ['!', ['has', 'limit']], paint: { 'fill-color': '#8fd3e8', 'fill-opacity': 0.12 } });
+    spotMap.addLayer({ id: 'acc-line', type: 'line', source: 'acc', paint: { 'line-color': ['case', ['has', 'limit'], 'rgba(255,255,255,.18)', '#8fd3e8'],
+      'line-width': 1.2, 'line-dasharray': ['case', ['has', 'limit'], ['literal', [2, 3]], ['literal', [1, 0]]] } });
+  }
+  function onPinDragEnd() {
+    const ll = spotPin.getLngLat(); const d = distM(spotFix, { lat: ll.lat, lng: ll.lng });
+    if (d > SPOT_MAX_MOVE_M) {
+      haptic('warn');
+      const from = { lat: ll.lat, lng: ll.lng };
+      spring(0, 1, (k) => spotPin.setLngLat([from.lng + (spotFix.lng - from.lng) * k, from.lat + (spotFix.lat - from.lat) * k]), { stiffness: 260, damping: 22, precision: 0.002 });
+      el.spotNote.dataset.q = 'weak';
+      el.spotNote.textContent = `That\u2019s ${Math.round(d)} m from your GPS fix. Pins can move up to ${SPOT_MAX_MOVE_M} m, so it snapped back.`;
+      root.dataset.spotMoved = '0';
+    } else {
+      haptic('tick');
+      root.dataset.spotMoved = d >= 1 ? '1' : '0';
+      el.spotNote.dataset.q = 'good';
+      el.spotNote.textContent = d >= 1 ? `Moved ${Math.round(d)} m. Drop when it\u2019s right on your spot.` : el.spotNote.textContent;
+    }
+  }
+
+  async function commitDrop() {
+    if (!s.blob || !spotFix || s.dropping) return;
+    s.dropping = true; el.spotOk.disabled = true; el.spotOk.textContent = 'Dropping\u2026';
+    const ll = spotPin ? spotPin.getLngLat() : { lat: spotFix.lat, lng: spotFix.lng };
+    const moved = distM(spotFix, { lat: ll.lat, lng: ll.lng });
+    const fix = { ...spotFix, lat: ll.lat, lng: ll.lng, adjustedM: moved >= 1 ? moved : 0 };
+    const place = await Promise.race([labelP || Promise.resolve(null), new Promise((r) => setTimeout(() => r(null), 1500))]);
     try {
       const args = {
         blurred: el.blur.checked, placeLabel: place || null,
         transcript: s.transcript || null, tags: s.tags?.length ? s.tags : null,
         unlockAt: !replyTo && v2() ? s.unlockAt || null : null, accuracy: fix.accuracy,
-        blob: s.blob,
-        mimeType: s.blob.type,
-        durationMs: Math.round(s.durationMs),
+        blob: s.blob, mimeType: s.blob.type, durationMs: Math.round(s.durationMs),
         lat: fix.lat, lng: fix.lng, accuracyM: fix.accuracy,
-        heading: s.heading, altitude: fix.altitude,
+        heading: s.heading, altitude: s.fix?.altitude,
       };
       const shim = { dropEcho };                 // trax's helpers call client.dropEcho: route them through the store
       const echo = replyTo ? await replyToEcho(shim, replyTo, args)
         : activeTrail && v2() && el.trail.checked ? await dropOnTrail(shim, activeTrail.id, args)
           : await dropEcho(args);
-      navigator.vibrate?.([30, 60, 30, 60, 90]);
+      setDuration(echo.id, s.durationMs);
+      haptic('drop');
       lastFix = fix;
       showConfirmation(echo);
     } catch (err) {
-      el.warn.textContent = `Couldn't drop: ${err?.friendly || err?.message || err}`;
-      onToast(`Couldn’t drop: ${err?.friendly || err?.message || err}`);
+      el.spotNote.dataset.q = 'weak';
+      el.spotNote.textContent = `Couldn\u2019t drop: ${err?.friendly || err?.message || err}. Tap Drop again; your recording is kept.`;
+      onToast(`Couldn\u2019t drop: ${err?.friendly || err?.message || err}`);
     } finally {
-      s.dropping = false; updateDropButton();
+      s.dropping = false; el.spotOk.disabled = false;
+      if (s.phase === 'spot') el.spotOk.textContent = spotFix?.lowConfidence ? 'Yes, I\u2019m here' : 'Drop here';
     }
-  });
+  }
 
   function showConfirmation(echo) {
     root.querySelector('[data-c-lat]').textContent = echo.lat.toFixed(5);
     root.querySelector('[data-c-lng]').textContent = echo.lng.toFixed(5);
     root.querySelector('[data-c-acc]').textContent = (echo.accuracy_m != null ? `\u00b1${Math.round(echo.accuracy_m)} m` : 'unknown')
-      + (lastFix?.precise ? ` \u00b7 locked from ${lastFix.samples} readings` : lastFix?.lowConfidence ? ' \u00b7 single reading (low confidence)' : '');
+      + (lastFix?.adjustedM ? ` \u00b7 pin moved ${Math.round(lastFix.adjustedM)} m by you` : '')
+      + (lastFix?.lowConfidence ? ' \u00b7 weak GPS, confirmed by you' : lastFix?.samples > 1 ? ` \u00b7 ${lastFix.samples} readings` : '');
     const placeEl = root.querySelector('[data-c-place]');
     if (echo.place_label) placeEl.textContent = echo.place_label;
     else if (navigator.onLine === false) placeEl.textContent = 'Unnamed spot';
@@ -505,12 +654,38 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     root.dataset.lastEchoId = echo.id;
     root.dataset.lastEchoSource = echo.source || '';
     el.audio.pause();
-    clearClip();
     setPhase('dropped');
+    startUndo(echo);
   }
 
-  el.another.addEventListener('click', () => setPhase('ready'));
-  el.see.addEventListener('click', () => onDropped(lastEcho));
+  // 5 s undo: the clip is kept until the window closes, so Undo returns to the review with the recording intact.
+  let undoT = 0, undoRaf = 0;
+  function startUndo(echo) {
+    clearTimeout(undoT); cancelAnimationFrame(undoRaf);
+    el.undo.hidden = false; el.undo.disabled = false; const t0 = performance.now();
+    const tick = () => {
+      const left = Math.max(0, UNDO_MS - (performance.now() - t0));
+      el.undoN.textContent = String(Math.ceil(left / 1000));
+      el.undoBar.style.transform = `scaleX(${(left / UNDO_MS).toFixed(3)})`;
+      if (left > 0 && !el.undo.hidden) undoRaf = requestAnimationFrame(tick);
+    };
+    tick();
+    undoT = setTimeout(endUndo, UNDO_MS);
+    el.undo.onclick = async () => {
+      clearTimeout(undoT); cancelAnimationFrame(undoRaf); el.undo.disabled = true; el.undoN.textContent = '';
+      try {
+        await store.retractEcho(echo.id);
+        haptic('tap'); onToast('Drop undone. Your recording is still here.');
+        el.undo.hidden = true; lastEcho = null; delete root.dataset.lastEchoId;
+        root.dataset.undone = echo.id;
+        setPhase('review'); updateDropButton();
+      } catch (err) { onToast(`Couldn\u2019t undo: ${err?.friendly || err?.message || err}. Open the echo on the map and tap Take it back.`); endUndo(); }
+    };
+  }
+  function endUndo() { cancelAnimationFrame(undoRaf); el.undo.hidden = true; if (s.phase === 'dropped') clearClip(); }
+
+  el.another.addEventListener('click', () => { endUndo(); clearClip(); setPhase('ready'); });
+  el.see.addEventListener('click', () => { endUndo(); onDropped(lastEcho); });
   el.close.addEventListener('click', () => onClose());
 
   // ---------------------------------------------------------------- small helpers
@@ -527,7 +702,8 @@ export function mountRecordScreen(root, { onClose = () => {}, onDropped = () => 
     // for the shell: release the mic when the screen is hidden for long, etc.
     destroy() {
       try { s.lt?.stop(); } catch { /* ignore */ }
-      cancelAnimationFrame(s.raf);
+      cancelAnimationFrame(s.raf); lockRun++; clearTimeout(undoT);
+      try { spotMap?.remove(); } catch { /* ignore */ }
       if (s.watchId != null) navigator.geolocation.clearWatch(s.watchId);
       s.stream?.getTracks().forEach((t) => t.stop());
       s.audioCtx?.close?.();

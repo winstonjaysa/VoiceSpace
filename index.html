@@ -54,9 +54,10 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="1.6"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6M5.2 5.2a9.6 9.6 0 0 0 0 13.6M18.8 5.2a9.6 9.6 0 0 1 0 13.6"/></svg>
       <span>Listen</span>
     </button>
-    <button class="fab" data-record aria-label="Record an echo here">
+    <button class="fab" data-record aria-label="Drop an echo here">
       <span class="fab-aura" aria-hidden="true"></span>
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/></svg>
+      <span class="fab-label" aria-hidden="true">Drop</span>
     </button>
     <button class="dock-btn glass" data-locate aria-label="Follow me on the map" aria-pressed="true">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/><circle cx="12" cy="12" r="7"/></svg>
@@ -77,6 +78,44 @@
       <li><span class="ios-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></span>Open it from your Home Screen, full screen with no browser bars</li>
     </ol>
     <p class="v2-hint" data-ios-other hidden>Open this page in Safari first; other iPhone browsers can’t add apps to the Home Screen.</p>
+  </section>
+  <section class="drawer glass" data-drawer data-snap="0" aria-label="Nearby echoes">
+    <button class="drawer-handle" data-drawer-handle aria-expanded="false" aria-controls="drawer-list">
+      <i class="grab" aria-hidden="true"></i>
+      <span class="dh-main"><strong data-drawer-title>Nearby</strong><span class="dh-new" data-drawer-new hidden></span></span>
+      <span class="dh-stats" data-drawer-stats></span>
+    </button>
+    <div class="drawer-body" id="drawer-list" data-drawer-list role="list"></div>
+  </section>
+  <section class="help-sheet glass" data-help hidden role="dialog" aria-labelledby="help-title"></section>
+  <section class="onboard" data-onboard hidden role="dialog" aria-modal="true" aria-label="Welcome to Echolocation">
+    <div class="ob-track" data-ob-track>
+      <article class="ob-card" aria-roledescription="slide" aria-label="1 of 3">
+        <div class="ob-art ob-art-ripple" aria-hidden="true"><span></span><span></span><span></span><i></i></div>
+        <p class="eyebrow">Echolocation</p>
+        <h2>Leave your voice where you stand</h2>
+        <p class="lede">Record up to 30 seconds. It’s pinned to this exact spot for 24 hours.</p>
+        <div class="ob-actions"><button class="btn primary big" data-ob-next>Next</button></div>
+      </article>
+      <article class="ob-card" aria-roledescription="slide" aria-label="2 of 3">
+        <div class="ob-art ob-art-cherry" aria-hidden="true"><span></span><b>🍒</b></div>
+        <p class="eyebrow">Find them by walking</p>
+        <h2>Unopened echoes glow as cherries</h2>
+        <p class="lede">Walk within a few metres to hear one. Your location places you on the map; it’s never shown to anyone.</p>
+        <p class="ob-status" data-ob-geo-status role="status"></p>
+        <div class="ob-actions"><button class="btn primary big" data-ob-geo>Turn on location</button><button class="btn ghost" data-ob-next>Not now</button></div>
+      </article>
+      <article class="ob-card" aria-roledescription="slide" aria-label="3 of 3">
+        <div class="ob-art ob-art-mic" aria-hidden="true"><span></span><span></span><i></i></div>
+        <p class="eyebrow">One tap</p>
+        <h2>Hit Drop, talk, done</h2>
+        <p class="lede">The big button is always at your thumb. You get 5 seconds to undo any drop.</p>
+        <p class="ob-status" data-ob-mic-status role="status"></p>
+        <div class="ob-actions"><button class="btn primary big" data-ob-mic>Allow microphone</button><button class="btn ghost" data-ob-done>Start exploring</button></div>
+      </article>
+    </div>
+    <div class="ob-dots" data-ob-dots aria-hidden="true"><i class="on"></i><i></i><i></i></div>
+    <button class="ob-skip" data-ob-done aria-label="Skip the introduction">Skip</button>
   </section>
   <section class="trailwalk glass" data-trailwalk hidden aria-live="polite" aria-label="Trail walk"></section>
   <section class="sheet glass" id="card" data-card hidden aria-live="polite" aria-label="Echo details"></section>

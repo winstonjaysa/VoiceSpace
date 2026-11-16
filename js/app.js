@@ -8,6 +8,8 @@ import { mountRecordScreen } from './record.js';
 import { openHunt, fmtDist } from './listen.js';
 import { APP_VERSION, APP_BUILD, SW_CACHE } from './config.js';
 import { onInstallChange, promptInstall } from './pwa.js';
+import * as opened from './opened.js';
+import { haptic, draggableSheet, cherryBurst, reduced as fxReduced } from './fx.js';
 import { canReplyHere, loadThread, startTrail, createTrailWalk, trailsNearMe } from './v2/index.js';
 
 const $ = (s) => document.querySelector(s);
@@ -17,6 +19,8 @@ const els = {
   live: $('[data-live]'), liveText: $('[data-live-text]'), toast: $('[data-toast]'),
   fab: $('[data-record]'), listenBtn: $('[data-listen]'), locate: $('[data-locate]'),
   gps: $('[data-gps-pill]'), gpsText: $('[data-gps-text]'), outbox: $('[data-outbox]'), outboxText: $('[data-outbox-text]'),
+  drawer: $('[data-drawer]'), drawerHandle: $('[data-drawer-handle]'), drawerList: $('[data-drawer-list]'), drawerTitle: $('[data-drawer-title]'),
+  drawerNew: $('[data-drawer-new]'), drawerStats: $('[data-drawer-stats]'), help: $('[data-help]'), onboard: $('[data-onboard]'),
   recenter: $('[data-recenter]'), install: $('[data-install]'), iosHint: $('[data-ios-hint]'), trailwalk: $('[data-trailwalk]'), about: $('[data-about]'), aboutOpen: $('[data-about-open]'), skeleton: $('[data-skeleton]'),
 };
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -47,9 +51,15 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 let toastT = 0;
 const toastSeen = new Map();
 /** Show a toast. `key` de-duplicates repeats of the same failure within 30 s. */
-function toast(msg, ms = 2800, key = null) {
+function toast(msg, ms = 2800, key = null, action = null) {
   if (key) { const t = toastSeen.get(key); if (t && Date.now() - t < 30000) return; toastSeen.set(key, Date.now()); }
   els.toast.textContent = msg; els.toast.hidden = false;
+  els.toast.classList.toggle('has-action', Boolean(action));
+  if (action) {
+    const b = document.createElement('button'); b.className = 'toast-act'; b.textContent = action.label;
+    b.addEventListener('click', () => { els.toast.classList.remove('show'); setTimeout(() => { els.toast.hidden = true; }, 300); action.fn(); }, { once: true });
+    els.toast.append(' ', b); ms = Math.max(ms, 5000);
+  }
   requestAnimationFrame(() => els.toast.classList.add('show'));
   clearTimeout(toastT);
   toastT = setTimeout(() => { els.toast.classList.remove('show'); setTimeout(() => { els.toast.hidden = true; }, 300); }, ms);
@@ -139,14 +149,16 @@ function startGeo() {
     }
     if (cardId) renderCard(cardId);
     if (trailWalk) trailWalk.update(me);
+    updateDrawer();
   }, (err) => {
     if (err.code === 1) {
       geoWatch = null; setGps('off', 'GPS off', 'Location is off. Tap to turn it on.');
-      toast('Location is off. The map still works, but you can\u2019t be placed on it.', 3600, 'geo-denied');
+      toast('Location is off, so you can\u2019t be placed on the map.', 6000, 'geo-denied', { label: 'How to fix', fn: () => showHelp('location') });
     } else if (!geoErrShown) {
       geoErrShown = true;
       if (!me) setGps('poor', 'No GPS fix', 'No GPS fix yet');
-      toast(err.code === 3 ? 'Still looking for a GPS fix\u2026 step outside or near a window.' : 'GPS is unavailable right now.', 3600, 'geo-err');
+      toast(err.code === 3 ? 'Still looking for a GPS fix. Step outside or near a window.' : 'GPS is unavailable right now.', 5000, 'geo-err',
+        { label: 'Retry', fn: () => { if (geoWatch != null) navigator.geolocation.clearWatch(geoWatch); geoWatch = null; geoErrShown = false; startGeo(); } });
     }
   }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
 }
@@ -171,6 +183,8 @@ function closeCard() {
   cardId = null; els.card.dataset.shape = ''; els.card.classList.remove('open');
   setTimeout(() => { if (!cardId) els.card.hidden = true; }, reducedMotion ? 0 : 280);
 }
+const fmtLen = (e) => { const ms = e.duration_ms || opened.durationMs(e.id); if (!ms) return '\u2014'; const t = Math.round(ms / 1000); return `0:${String(t).padStart(2, '0')}`; };
+const fmtPlays = (e) => (Number.isFinite(e.listen_count) ? String(e.listen_count) : '\u2014');
 function renderCard(id) {
   const e = feed.get(id);
   if (!e) { closeCard(); return; }
@@ -189,10 +203,10 @@ function renderCard(id) {
   const shape = `${id}|${queued}|${Boolean(e.mine)}|${v2On()}|${blurred}`;
   if (els.card.dataset.shape === shape && els.card.querySelector('.card-head')) {
     const set = (sel, v, attr) => { const n = els.card.querySelector(sel); if (n && (attr ? n.getAttribute(attr) : n.innerHTML) !== v) attr ? n.setAttribute(attr, v) : (n.innerHTML = v); };
-    set('.card-title .eyebrow', `${e.mine ? 'Your echo' : 'Echo'} · ${queued ? '<span class="tag-queued">Queued, will upload</span>' : heatWord(res)}${blurred ? ' · Blurred' : ''}`);
+    set('.card-title .eyebrow', `${e.mine ? 'Your echo' : opened.isOpened(e.id) ? 'Echo \u00b7 opened' : '\u{1F352} Unopened'} · ${queued ? '<span class="tag-queued">Queued, will upload</span>' : heatWord(res)}${blurred ? ' · Blurred' : ''}`);
     set('.card-title strong', where);
     set('[data-stat="age"]', esc(ago(e.created_at))); set('[data-stat="left"]', esc(left(e.expires_at)));
-    set('[data-stat="res"]', String(res)); set('[data-stat="dist"]', d == null ? '—' : (blurred ? '~' : '') + fmtDist(d));
+    set('[data-stat="res"]', String(res)); set('[data-stat="len"]', fmtLen(e)); set('[data-stat="plays"]', fmtPlays(e)); set('[data-stat="dist"]', d == null ? '—' : (blurred ? '~' : '') + fmtDist(d));
     set('.life i', `transform:scaleX(${lifeFrac.toFixed(3)})`, 'style');
     set('.card-note', note);
     const glyph = els.card.querySelector('.card-glyph'); if (glyph) glyph.dataset.heat = heatWord(res).toLowerCase();
@@ -209,16 +223,18 @@ function renderCard(id) {
     <header class="card-head">
       <div class="card-glyph" data-heat="${heatWord(res).toLowerCase()}" aria-hidden="true"><span></span><span></span></div>
       <div class="card-title">
-        <span class="eyebrow">${e.mine ? 'Your echo' : 'Echo'} · ${queued ? '<span class="tag-queued">Queued, will upload</span>' : heatWord(res)}${blurred ? ' · Blurred' : ''}</span>
+        <span class="eyebrow">${e.mine ? 'Your echo' : opened.isOpened(e.id) ? 'Echo \u00b7 opened' : '\u{1F352} Unopened'} · ${queued ? '<span class="tag-queued">Queued, will upload</span>' : heatWord(res)}${blurred ? ' · Blurred' : ''}</span>
         <strong>${where}</strong>
       </div>
       <button class="icon-btn" data-card-close aria-label="Close echo details"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </header>
     <dl class="stats">
+      <div><dt>Distance</dt><dd data-stat="dist">${d == null ? '—' : (blurred ? '~' : '') + fmtDist(d)}</dd></div>
+      <div><dt>Length</dt><dd data-stat="len">${fmtLen(e)}</dd></div>
+      <div><dt>Plays</dt><dd data-stat="plays">${fmtPlays(e)}</dd></div>
       <div><dt>Dropped</dt><dd data-stat="age">${esc(ago(e.created_at))}</dd></div>
       <div><dt>Fades</dt><dd data-stat="left">${esc(left(e.expires_at))}</dd></div>
       <div><dt>Resonance</dt><dd data-stat="res">${res}</dd></div>
-      <div><dt>Distance</dt><dd data-stat="dist">${d == null ? '—' : (blurred ? '~' : '') + fmtDist(d)}</dd></div>
     </dl>
     <div class="life" role="img" aria-label="Time left: ${esc(left(e.expires_at))}"><i style="transform:scaleX(${lifeFrac.toFixed(3)})"></i></div>
     <p class="card-note">${note}</p>
@@ -305,7 +321,7 @@ els.trailwalk.addEventListener('click', (ev) => {
 });
 
 function openCard(id) {
-  cardId = id; renderCard(id);
+  cardId = id; renderCard(id); haptic('tick'); opened.markSeen([id]); updateDrawer();
   const e = feed.get(id);
   setFollow(false);
   // keep the glow visible above the sheet
@@ -350,6 +366,7 @@ function openRecord({ autoStart = true, replyTo = null } = {}) {
     autoStart, replyTo, activeTrail: v2On() ? activeTrail : null,
     onClose: closeRecord,
     onToast: (m) => toast(m, 3600),
+    onHelp: (k) => showHelp(k),
     onDropped: (echo) => {
       closeRecord();
       setTimeout(() => {
@@ -371,10 +388,11 @@ function startHunt(target = null) {
   showOverlay(els.listen);
   startGeo();
   huntApi = openHunt(els.listen, { target, initialFix: lastRawFix, onClose: () => { huntApi = null; hideOverlay(els.listen); },
-    onError: (e) => toast(`Couldn\u2019t start listening: ${e.friendly || e.message || e}`, 3600) });
+    onError: (e) => toast(`Couldn\u2019t start listening: ${e.friendly || e.message || e}`, 5000, null,
+      /denied|permission/i.test(String(e?.message)) ? { label: 'How to fix', fn: () => showHelp('location') } : { label: 'Try again', fn: () => startHunt(target) }) });
 }
 
-els.fab.addEventListener('click', () => openRecord({ autoStart: true }));
+els.fab.addEventListener('click', () => { haptic('tap'); drawerCtl.snapTo(0); openRecord({ autoStart: true }); });
 els.listenBtn.addEventListener('click', () => startHunt(null));
 function recenter() {
   startGeo(); startCompass(); setFollow(true); closeCard();
@@ -496,7 +514,7 @@ window.addEventListener('unhandledrejection', (ev) => {
   toast(`Something went wrong: ${ev.reason?.friendly || ev.reason?.message || ev.reason}`, 3600, 'unhandled');
   ev.preventDefault();
 });
-window.addEventListener('error', (ev) => { if (ev.message) toast('Something went wrong. Try again.', 3600, 'error'); });
+window.addEventListener('error', (ev) => { if (ev.message) toast('Something went wrong.', 5000, 'error', { label: 'Reload', fn: () => location.reload() }); });
 
 // ------------------------------------------------------------------ boot
 async function waitForMapLibre(ms = 10000) {
@@ -505,6 +523,7 @@ async function waitForMapLibre(ms = 10000) {
   return Boolean(window.maplibregl);
 }
 
+let knownIds = null;
 async function boot() {
   feed = createMapFeed({
     onChange: (list) => {
@@ -514,9 +533,14 @@ async function boot() {
       body.dataset.echoCount = String(list.length);
       updateLive();
       if (cardId) { if (feed.get(cardId)) renderCard(cardId); else closeCard(); }
+      // pins that just arrived drop in (not on first load)
+      const ids = new Set(list.map((e) => e.id));
+      if (knownIds) for (const e of list) if (!knownIds.has(e.id) && !e.queued) view?.dropIn(e, { cherry: !e.mine && !opened.isOpened(e.id) });
+      knownIds = ids;
+      updateDrawer();
     },
     onStatus: updateLive,
-    onError: (e) => toast(`Couldn\u2019t refresh echoes: ${e?.friendly || e?.message || e}`, 3200, 'poll'),
+    onError: (e) => toast(`Couldn\u2019t refresh echoes: ${e?.friendly || e?.message || e}`, 5000, 'poll', { label: 'Retry', fn: () => feed.refresh?.() }),
   });
   window.addEventListener('echo-map:realtime', (ev) => {
     if (ev.detail.event === 'drop' && !store.isMine(ev.detail.id)) toast('A new echo just surfaced on the map');
@@ -527,7 +551,7 @@ async function boot() {
   const center = Number.isFinite(qLat) && Number.isFinite(qLng) ? { lat: qLat, lng: qLng } : last ? { lat: last.lat, lng: last.lng } : null;
   if (!(await waitForMapLibre())) {
     els.liveText.textContent = 'Map failed to load'; els.skeleton?.classList.add('done');
-    toast('The map couldn\u2019t load. Check your connection and reload.', 6000);
+    toast('The map couldn\u2019t load. Check your connection.', 60000, null, { label: 'Reload', fn: () => location.reload() });
     return;
   }
   view = createMapView(els.map, {
@@ -545,7 +569,7 @@ async function boot() {
       else if (/Failed to fetch|NetworkError|AJAXError/i.test(m)) toast('Some map tiles didn\u2019t load.', 3000, 'tiles');
     },
   });
-  window.__echoApp = { store, feed, view, openCard, startHunt, openRecord, openAbout, setFollow, walkTrail, setActiveTrail,
+  window.__echoApp = { store, feed, view, opened, drawer: () => drawerCtl, showHelp, openCard, startHunt, openRecord, openAbout, setFollow, walkTrail, setActiveTrail,
     get trailWalk() { return trailWalk; },
     get me() { return me; }, get followMe() { return followMe; },
     get lastFix() { return lastRawFix ? { lat: lastRawFix.coords.latitude, lng: lastRawFix.coords.longitude, accuracy: lastRawFix.coords.accuracy, ts: lastRawFix.timestamp } : null; } };
@@ -558,6 +582,166 @@ async function boot() {
   if (location.hash === '#record') { history.replaceState(null, '', location.pathname + location.search); openRecord({ autoStart: false }); }
 }
 boot();
+
+// ------------------------------------------------------------------ help sheet: every error has a next step
+const isIOSDevice = /iPhone|iPad|iPod/.test(navigator.userAgent);
+const HELP = {
+  location: () => ({ title: 'Turn on location', steps: isIOSDevice
+    ? ['Open <strong>Settings</strong> \u203a <strong>Privacy &amp; Security</strong> \u203a <strong>Location Services</strong>.', 'Set <strong>Safari Websites</strong> (or Echolocation, if installed) to <strong>While Using</strong>.', 'Come back here and tap <strong>Try again</strong>.']
+    : ['Tap the <strong>lock / tune icon</strong> next to the address bar.', 'Open <strong>Permissions</strong> and set <strong>Location</strong> to <strong>Allow</strong>.', 'Come back here and tap <strong>Try again</strong>.'],
+    action: 'Try again', fn: () => { if (geoWatch != null) navigator.geolocation.clearWatch(geoWatch); geoWatch = null; startGeo(); } }),
+  mic: () => ({ title: 'Allow the microphone', steps: isIOSDevice
+    ? ['Open <strong>Settings</strong> \u203a <strong>Safari</strong> \u203a <strong>Microphone</strong>.', 'Choose <strong>Ask</strong> or <strong>Allow</strong>.', 'Come back and tap <strong>Drop</strong> again.']
+    : ['Tap the <strong>lock / tune icon</strong> next to the address bar.', 'Set <strong>Microphone</strong> to <strong>Allow</strong>.', 'Come back and tap <strong>Drop</strong> again.'],
+    action: 'Drop an echo', fn: () => openRecord({ autoStart: true }) }),
+};
+function showHelp(kind) {
+  const h = HELP[kind]?.(); if (!h) return;
+  els.help.innerHTML = `<div class="grab" aria-hidden="true"></div>
+    <header class="card-head"><div class="card-title"><span class="eyebrow">Quick fix</span><strong id="help-title">${h.title}</strong></div>
+      <button class="icon-btn" data-help-close aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+    <ol class="ios-steps help-steps">${h.steps.map((x, i) => `<li><span class="ios-ico" aria-hidden="true">${i + 1}</span><span>${x}</span></li>`).join('')}</ol>
+    <div class="row"><button class="btn primary" data-help-act>${h.action}</button></div>`;
+  els.help.hidden = false; requestAnimationFrame(() => els.help.classList.add('open'));
+  els.help.querySelector('[data-help-act]').onclick = () => { closeHelp(); h.fn(); };
+  els.help.querySelector('[data-help-close]').onclick = closeHelp;
+  els.help.querySelector('[data-help-close]').focus();
+}
+function closeHelp() { els.help.classList.remove('open'); setTimeout(() => { els.help.hidden = true; }, 250); }
+
+// ------------------------------------------------------------------ nearby drawer (pull-up sheet)
+const NEAR_M = 3000;
+const R_E = 6371008.8, rd = (x) => x * Math.PI / 180;
+function brg(a, b) {
+  const y = Math.sin(rd(b.lng - a.lng)) * Math.cos(rd(b.lat));
+  const x = Math.cos(rd(a.lat)) * Math.sin(rd(b.lat)) - Math.sin(rd(a.lat)) * Math.cos(rd(b.lat)) * Math.cos(rd(b.lng - a.lng));
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+function hav(a, b) { const dLat = rd(b.lat - a.lat), dLng = rd(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rd(a.lat)) * Math.cos(rd(b.lat)) * Math.sin(dLng / 2) ** 2; return 2 * R_E * Math.asin(Math.min(1, Math.sqrt(h))); }
+function nearbyList() {
+  const from = me || (view?.ready ? view.map.getCenter() : null);
+  if (!from || !feed) return { from: null, rows: [] };
+  const rows = feed.list().filter((e) => !e.expired && Number.isFinite(e.lat))
+    .map((e) => ({ e, d: Math.max(0, hav(from, e) - blurR(e) * 0.5), b: brg(from, e) }))
+    .filter((r) => r.d <= NEAR_M).sort((a, b) => a.d - b.d).slice(0, 60);
+  return { from, rows };
+}
+const drawerCtl = draggableSheet(els.drawer, els.drawerHandle, {
+  getSnaps: () => {
+    const H = els.drawer.offsetHeight || 600; const dock = document.querySelector('.dock').getBoundingClientRect();
+    const peek = Math.min(H, Math.max(0, innerHeight - dock.top) + 72);       // handle sits just above the dock
+    return [H - peek, Math.round(H * 0.45), 0];
+  },
+  onSnap: (ix) => {
+    els.drawerHandle.setAttribute('aria-expanded', String(ix > 0)); body.classList.toggle('drawer-open', ix > 0);
+    els.drawer.dataset.snap = String(ix);
+    if (ix > 0) { opened.markSeen(nearbyList().rows.map((r) => r.e.id)); updateDrawer(); }
+  },
+});
+els.drawerHandle.addEventListener('sheettap', () => { haptic('tick'); drawerCtl.snapTo(drawerCtl.index === 0 ? 2 : 0); });
+els.drawerHandle.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drawerCtl.snapTo(drawerCtl.index === 0 ? 2 : 0); } });
+addEventListener('resize', () => drawerCtl.refresh());
+let drawerT = 0, lastNewToast = 0;
+function updateDrawer() {
+  clearTimeout(drawerT);
+  drawerT = setTimeout(renderDrawer, 120);
+}
+function renderDrawer() {
+  const { from, rows } = nearbyList();
+  const others = rows.filter((r) => !r.e.mine && !r.e.queued);
+  const fresh = opened.unseen(others.map((r) => r.e.id));
+  const st = opened.stats();
+  els.drawerTitle.textContent = rows.length ? `${plural(rows.length, 'echo')} nearby` : 'No echoes nearby';
+  els.drawerNew.hidden = !fresh.length; els.drawerNew.textContent = `${fresh.length} new`;
+  els.drawerStats.textContent = st.found ? `\u{1F352} ${st.found} found${st.streak > 1 ? ` \u00b7 ${st.streak}-day streak` : ''}` : '';
+  els.drawer.dataset.new = fresh.length ? '1' : '';
+  if (fresh.length && drawerCtl.index === 0 && Date.now() - lastNewToast > 120000 && !body.classList.contains('has-overlay') && !onboardingOpen && !cardId && els.about.hidden && els.help.hidden) {
+    lastNewToast = Date.now();
+    toast(`${plural(fresh.length, 'new echo')} near you`, 5000, null, { label: 'Show', fn: () => drawerCtl.snapTo(2) });
+  }
+  if (!rows.length) {
+    els.drawerList.innerHTML = `<div class="empty"><div class="empty-art" aria-hidden="true"><span></span><span></span><i></i></div>
+      <strong>${from ? 'No echoes nearby yet' : 'Finding you\u2026'}</strong>
+      <p>${from ? 'Be the first. Leave something for the next person who walks by.' : 'Turn on location to see what\u2019s around you.'}</p>
+      ${from ? '<button class="btn primary" data-empty-drop>Drop the first echo</button>' : '<button class="btn primary" data-empty-geo>Turn on location</button>'}</div>`;
+    return;
+  }
+  const head = currentHeading();
+  const items = rows.map(({ e, d, b }) => {
+    const unopened = !e.mine && !e.queued && !opened.isOpened(e.id);
+    const isNew = fresh.includes(e.id);
+    const rel = Number.isFinite(head) ? b - head : b;
+    const plays = Number.isFinite(e.listen_count) ? ` \u00b7 \u25B6 ${e.listen_count}` : '';
+    const len = fmtLen(e);
+    return `<button class="near-row${unopened ? ' is-unopened' : ''}" role="listitem" data-near="${esc(e.id)}"
+        aria-label="${unopened ? 'Unopened echo' : e.mine ? 'Your echo' : 'Opened echo'}, ${blurR(e) ? 'about ' : ''}${fmtDist(d)} away, ${len !== '\u2014' ? `${len} long, ` : ''}dropped ${esc(ago(e.created_at))}, fades in ${esc(left(e.expires_at))}">
+      <span class="nr-ico" aria-hidden="true">${unopened ? '\u{1F352}' : '<i></i>'}</span>
+      <span class="nr-main"><strong>${blurR(e) ? '~' : ''}${fmtDist(d)} <svg class="nr-arrow" viewBox="0 0 24 24" style="transform:rotate(${rel.toFixed(0)}deg)" aria-hidden="true"><path d="M12 3l6 16-6-4-6 4z"/></svg></strong>
+        <small>${len !== '\u2014' ? `${len} \u00b7 ` : ''}${esc(ago(e.created_at))} \u00b7 fades in ${esc(left(e.expires_at))}${plays}</small></span>
+      <span class="nr-state">${e.mine ? 'Yours' : e.queued ? 'Queued' : unopened ? (isNew ? 'New' : 'Unopened') : 'Opened'}</span>
+    </button>`;
+  });
+  // Patch rows in place when the order is unchanged (GPS updates every second): taps in progress survive and
+  // the entry animation doesn't replay. Rebuild only when the set or order changes.
+  const want = rows.map((r) => r.e.id);
+  const have = [...els.drawerList.querySelectorAll('[data-near]')];
+  if (have.length === want.length && have.every((n, i) => n.dataset.near === want[i])) {
+    const t = document.createElement('template');
+    items.forEach((html, i) => {
+      t.innerHTML = html.trim(); const fresh = t.content.firstElementChild, cur = have[i];
+      if (cur.className !== fresh.className) cur.className = fresh.className;
+      if (cur.getAttribute('aria-label') !== fresh.getAttribute('aria-label')) cur.setAttribute('aria-label', fresh.getAttribute('aria-label'));
+      if (cur.innerHTML !== fresh.innerHTML) cur.innerHTML = fresh.innerHTML;
+    });
+  } else els.drawerList.innerHTML = items.join('');
+}
+els.drawerList.addEventListener('click', (ev) => {
+  const b = ev.target.closest('button'); if (!b) return;
+  if (b.matches('[data-empty-drop]')) { openRecord({ autoStart: true }); return; }
+  if (b.matches('[data-empty-geo]')) { startGeo(); startCompass(); return; }
+  const id = b.dataset.near; const e = id && feed.get(id); if (!e) return;
+  haptic('tap'); drawerCtl.snapTo(0); setFollow(false);
+  view?.flyTo(e, Math.max(16.5, view.map.getZoom()));
+  setTimeout(() => openCard(id), fxReduced() ? 0 : 700);
+});
+opened.events.addEventListener('opened', () => { view?.refreshPins(); updateDrawer(); });
+
+// ------------------------------------------------------------------ first run: 3 swipeable cards, permissions in context
+let onboardingOpen = false;
+function maybeOnboard() {
+  let done = false; try { done = localStorage.getItem('echolocation.onboarded') === '1'; } catch { /* ignore */ }
+  if (done || params.has('noonboard')) return;
+  onboardingOpen = true; els.onboard.hidden = false; requestAnimationFrame(() => els.onboard.classList.add('open'));
+  const track = els.onboard.querySelector('[data-ob-track]'); const dots = [...els.onboard.querySelectorAll('[data-ob-dots] i')];
+  const go = (i) => { track.scrollTo({ left: i * track.clientWidth, behavior: fxReduced() ? 'auto' : 'smooth' }); };
+  const ix = () => Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
+  track.addEventListener('scroll', () => { const i = ix(); dots.forEach((d, k) => d.classList.toggle('on', k === i)); }, { passive: true });
+  els.onboard.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button'); if (!b) return; haptic('tick');
+    if (b.matches('[data-ob-next]')) go(ix() + 1);
+    else if (b.matches('[data-ob-done]')) finish();
+    else if (b.matches('[data-ob-geo]')) {
+      const st = els.onboard.querySelector('[data-ob-geo-status]'); st.textContent = 'Asking\u2026'; b.disabled = true;
+      navigator.geolocation?.getCurrentPosition(() => { st.textContent = '\u2713 Location on'; b.textContent = 'Next'; b.disabled = false; b.removeAttribute('data-ob-geo'); b.setAttribute('data-ob-next', ''); startGeo(); startCompass(); setTimeout(() => go(2), 500); },
+        (err) => { b.disabled = false; st.textContent = err.code === 1 ? 'Location is blocked. You can still browse; turn it on later from the GPS pill.' : 'No fix yet. That\u2019s fine, it keeps trying.'; if (err.code !== 1) startGeo(); b.textContent = 'Next'; b.removeAttribute('data-ob-geo'); b.setAttribute('data-ob-next', ''); },
+        { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
+    } else if (b.matches('[data-ob-mic]')) {
+      const st = els.onboard.querySelector('[data-ob-mic-status]'); st.textContent = 'Asking\u2026'; b.disabled = true;
+      navigator.mediaDevices?.getUserMedia({ audio: true }).then((ms) => { ms.getTracks().forEach((t) => t.stop()); st.textContent = '\u2713 Microphone ready'; finishSoon(b); },
+        () => { st.textContent = 'Microphone blocked. You can allow it later when you drop your first echo.'; finishSoon(b); });
+    }
+  });
+  const finishSoon = (b) => { b.disabled = false; b.textContent = 'Start exploring'; b.removeAttribute('data-ob-mic'); b.setAttribute('data-ob-done', ''); };
+  function finish() {
+    try { localStorage.setItem('echolocation.onboarded', '1'); } catch { /* ignore */ }
+    els.onboard.classList.remove('open'); onboardingOpen = false;
+    setTimeout(() => { els.onboard.hidden = true; els.fab.focus(); }, fxReduced() ? 0 : 350);
+    updateDrawer();
+  }
+  els.onboard.querySelector('[data-ob-next]').focus();
+}
+maybeOnboard();
 
 // ------------------------------------------------------------------ install as an app
 let installMode = 'none';
